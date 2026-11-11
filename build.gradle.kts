@@ -223,6 +223,7 @@ val fatJar by tasks.registering(Jar::class) {
 val regressionClasses = listOf(
     "bms.player.beatoraja.RivalDataAccessorTest",
     "bms.player.beatoraja.song.ExtendedBmsDecoderTest",
+    "bms.player.beatoraja.song.MetadataRepairTest",
     "bms.player.beatoraja.skin.lr2.PlayerReviewLevelTest",
     "bms.player.beatoraja.result.MusicResultReviewTest",
     "bms.player.beatoraja.external.discord.DiscordWebhookTest",
@@ -344,7 +345,7 @@ val regressionTasks = regressionClasses.map { className ->
         enableAssertions = true
         maxHeapSize = "1g"
         systemProperty("java.awt.headless", "true")
-        if (className.endsWith("ExtendedBmsDecoderTest")) {
+        if (className.endsWith("MetadataRepairTest") || className.endsWith("ExtendedBmsDecoderTest")) {
             doFirst { args(temporaryDir.resolve("run-${System.nanoTime()}").absolutePath) }
         }
     }
