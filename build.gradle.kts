@@ -225,6 +225,7 @@ val regressionClasses = listOf(
     "bms.player.beatoraja.song.ExtendedBmsDecoderTest",
     "bms.player.beatoraja.song.MetadataRepairTest",
     "bms.player.beatoraja.song.ArchiveMigrationRollbackTest",
+    "bms.player.beatoraja.TableDataBoundaryTest",
     "bms.player.beatoraja.skin.lr2.PlayerReviewLevelTest",
     "bms.player.beatoraja.result.MusicResultReviewTest",
     "bms.player.beatoraja.external.discord.DiscordWebhookTest",
