@@ -13,6 +13,7 @@ import java.nio.file.Paths;
 import java.nio.file.SimpleFileVisitor;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.sql.*;
+import java.text.Normalizer;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Logger;
@@ -382,11 +383,41 @@ public class SQLiteSongDatabaseAccessor extends SQLiteDatabaseAccessor implement
 
 	}
 
+	private static String escapeLike(String value) {
+		return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
+	}
+
+	private static void registerNfcFunction(Connection conn) throws SQLException {
+		org.sqlite.Function.create(conn, "nfc", new org.sqlite.Function() {
+			@Override
+			protected void xFunc() throws SQLException {
+				String val = value_text(0);
+				if (val == null) {
+					result();
+				} else {
+					result(Normalizer.normalize(val, Normalizer.Form.NFC));
+				}
+			}
+		});
+	}
+
 	public SongData[] getSongDatasByText(String text) {
-		try {
-			List<SongData> m = qr.query(
-					"SELECT * FROM song WHERE rtrim(title||' '||subtitle||' '||artist||' '||subartist||' '||genre) LIKE ?"
-							+ " GROUP BY sha256",songhandler, "%" + text + "%");
+		if (text == null) {
+			return SongData.EMPTY;
+		}
+		// 検索文字列の % _ \ は文字として扱う。非ASCIIの検索は両辺をNFCで比較し、保存値は変更しない。
+		// '%', '_' and '\' in the search text are literal. Non-ASCII text is compared in NFC on both sides; stored values are untouched.
+		String columns = "rtrim(coalesce(title, '')||' '||coalesce(subtitle, '')||' '||coalesce(artist, '')||' '||coalesce(subartist, '')||' '||coalesce(genre, ''))";
+		boolean ascii = text.chars().allMatch(c -> c <= 0x7F);
+		// The data source opens a new connection per call, so the function lives only for this query.
+		try (Connection conn = ds.getConnection()) {
+			if (!ascii) {
+				registerNfcFunction(conn);
+			}
+			List<SongData> m = qr.query(conn,
+					"SELECT * FROM song WHERE " + (ascii ? columns : "nfc(" + columns + ")") + " LIKE ? ESCAPE '\\'"
+							+ " GROUP BY sha256", songhandler,
+					"%" + escapeLike(ascii ? text : Normalizer.normalize(text, Normalizer.Form.NFC)) + "%");
 			return toSongDataArray(m);
 		} catch (Exception e) {
 			bms.player.beatoraja.input.text.TextInputDiagnostics.failure("search-db-failure", 0, e);
@@ -574,8 +605,8 @@ public class SQLiteSongDatabaseAccessor extends SQLiteDatabaseAccessor implement
 					StringBuilder dsql = new StringBuilder();
 					Object[] param = new String[bmsroot.length];
 					for (int i = 0; i < bmsroot.length; i++) {
-						dsql.append("path NOT LIKE ?");
-						param[i] = bmsroot[i] + "%";
+						dsql.append("path NOT LIKE ? ESCAPE '\\'");
+						param[i] = escapeLike(bmsroot[i]) + "%";
 						if (i < bmsroot.length - 1) {
 							dsql.append(" AND ");
 						}
@@ -718,9 +749,6 @@ public class SQLiteSongDatabaseAccessor extends SQLiteDatabaseAccessor implement
 			qr.update(conn, "DELETE FROM folder WHERE path LIKE ? ESCAPE '\\'", pathPrefix);
 		}
 
-		private String escapeLike(String value) {
-			return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
-		}
 
 		private BMSFolder createArchiveFolder(Path archive, String[] bmsroot, long lastModifiedTime, String rootDirectory) {
 			return new BMSFolder(SongArchives.virtualRoot(archive, rootDirectory), bmsroot, lastModifiedTime,
@@ -810,7 +838,7 @@ public class SQLiteSongDatabaseAccessor extends SQLiteDatabaseAccessor implement
 							}
 							continue;
 						}
-						String filename = child.getFileName().toString().toLowerCase();
+						String filename = child.getFileName().toString().toLowerCase(Locale.ROOT);
 						if (!txt && filename.endsWith(".txt")) {
 							txt = true;
 						}
@@ -851,8 +879,9 @@ public class SQLiteSongDatabaseAccessor extends SQLiteDatabaseAccessor implement
 				}
 				folders.parallelStream().filter(Objects::nonNull).forEach(folder -> {
 					try {
-						qr.update(property.conn, "DELETE FROM folder WHERE path LIKE ?", folder.getPath() + "%");
-						qr.update(property.conn, "DELETE FROM song WHERE path LIKE ?", folder.getPath() + "%");
+						String pathPrefix = escapeLike(folder.getPath()) + "%";
+						qr.update(property.conn, "DELETE FROM folder WHERE path LIKE ? ESCAPE '\\'", pathPrefix);
+						qr.update(property.conn, "DELETE FROM song WHERE path LIKE ? ESCAPE '\\'", pathPrefix);
 					} catch (SQLException e) {
 						Logger.getGlobal().severe("ディレクトリ内に存在しないフォルダレコード削除の例外:" + e.getMessage());
 					}
@@ -893,7 +922,7 @@ public class SQLiteSongDatabaseAccessor extends SQLiteDatabaseAccessor implement
 
 					BMSModel model;
 					try {
-						if (pathname.toLowerCase().endsWith(".bmson")) {
+						if (pathname.toLowerCase(Locale.ROOT).endsWith(".bmson")) {
 							if (bmsondecoder == null) {
 								bmsondecoder = new BMSONDecoder(BMSModel.LNTYPE_LONGNOTE);
 							}
@@ -985,8 +1014,8 @@ public class SQLiteSongDatabaseAccessor extends SQLiteDatabaseAccessor implement
 				if (song.getDifficulty() != 0) {
 					return;
 				}
-				String fullTitle = (song.getTitle() + song.getSubtitle()).toLowerCase();
-				String diffName = song.getSubtitle().toLowerCase();
+				String fullTitle = (song.getTitle() + song.getSubtitle()).toLowerCase(Locale.ROOT);
+				String diffName = song.getSubtitle().toLowerCase(Locale.ROOT);
 				if (diffName.contains("beginner")) song.setDifficulty(1);
 				else if (diffName.contains("normal")) song.setDifficulty(2);
 				else if (diffName.contains("hyper")) song.setDifficulty(3);
@@ -1076,8 +1105,8 @@ public class SQLiteSongDatabaseAccessor extends SQLiteDatabaseAccessor implement
 			StringBuilder sql = new StringBuilder();
 			Object[] params = new Object[roots.length];
 			for (int index = 0; index < roots.length; index++) {
-				sql.append("path NOT LIKE ?");
-				params[index] = roots[index] + "%";
+				sql.append("path NOT LIKE ? ESCAPE '\\'");
+				params[index] = escapeLike(roots[index]) + "%";
 				if (index < roots.length - 1) {
 					sql.append(" AND ");
 				}
@@ -1231,8 +1260,9 @@ public class SQLiteSongDatabaseAccessor extends SQLiteDatabaseAccessor implement
 				try {
 					// System.out.println("Song Database : folder deleted - " +
 					// record.getPath());
-					qr.update(property.conn, "DELETE FROM folder WHERE path LIKE ?", folder.getPath() + "%");
-					qr.update(property.conn, "DELETE FROM song WHERE path LIKE ?", folder.getPath() + "%");
+					String pathPrefix = escapeLike(folder.getPath()) + "%";
+					qr.update(property.conn, "DELETE FROM folder WHERE path LIKE ? ESCAPE '\\'", pathPrefix);
+					qr.update(property.conn, "DELETE FROM song WHERE path LIKE ? ESCAPE '\\'", pathPrefix);
 				} catch (SQLException e) {
 					Logger.getGlobal().severe("ディレクトリ内に存在しないフォルダレコード削除の例外:" + e.getMessage());
 				}
@@ -1298,8 +1328,8 @@ public class SQLiteSongDatabaseAccessor extends SQLiteDatabaseAccessor implement
 				final SongData sd = decoded.song();
 				if (sd.getNotes() != 0 || model.getWavList().length != 0) {
 					if (sd.getDifficulty() == 0) {
-						final String fulltitle = (sd.getTitle() + sd.getSubtitle()).toLowerCase();
-						final String diffname = (sd.getSubtitle()).toLowerCase();
+						final String fulltitle = (sd.getTitle() + sd.getSubtitle()).toLowerCase(Locale.ROOT);
+						final String diffname = (sd.getSubtitle()).toLowerCase(Locale.ROOT);
 						if (diffname.contains("beginner")) {
 							sd.setDifficulty(1);
 						} else if (diffname.contains("normal")) {
