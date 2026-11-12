@@ -701,13 +701,22 @@ public class SQLiteSongDatabaseAccessor extends SQLiteDatabaseAccessor implement
 			});
 
 			for (Path archive : archives) {
+				Savepoint migration = conn.setSavepoint();
 				try {
 					Path normalizedArchive = archive.toAbsolutePath().normalize();
-					Path destination = SongArchives.expandToSongDirectory(normalizedArchive);
+					// 失敗し得るSQLを移動前に実行し、展開失敗なら戻す。
+					// Finish fallible SQL before moving the archive; roll it back if extraction fails.
 					deleteArchiveRecords(conn, normalizedArchive);
+					Path destination = SongArchives.expandToSongDirectory(normalizedArchive);
 					Logger.getGlobal().info("楽曲アーカイブを展開しました : " + archive + " -> " + destination);
 				} catch (IOException e) {
+					conn.rollback(migration);
 					Logger.getGlobal().warning("楽曲アーカイブ展開失敗:" + archive + " : " + e.getMessage());
+				} catch (SQLException e) {
+					conn.rollback(migration);
+					throw e;
+				} finally {
+					conn.releaseSavepoint(migration);
 				}
 			}
 		}
