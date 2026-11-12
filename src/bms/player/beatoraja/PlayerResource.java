@@ -14,6 +14,7 @@ import bms.player.beatoraja.ir.RankingData;
 import bms.player.beatoraja.play.BMSPlayerRule;
 import bms.player.beatoraja.play.GrooveGauge;
 import bms.player.beatoraja.play.bga.BGAProcessor;
+import bms.player.beatoraja.song.ExtendedBMSDecoder;
 import bms.player.beatoraja.song.SongData;
 import bms.player.beatoraja.song.SongResource;
 import bms.player.beatoraja.song.SongResources;
@@ -212,7 +213,7 @@ public final class PlayerResource {
 	}
 
 	public BMSModel loadBMSModel(ChartInformation info) {
-		ChartDecoder decoder = info.source != null ? ChartDecoder.getDecoder(info.source) : ChartDecoder.getDecoder(info.path);
+		ChartDecoder decoder = ExtendedBMSDecoder.getDecoder(info);
 		if(decoder == null) {
 			return null;
 		}
