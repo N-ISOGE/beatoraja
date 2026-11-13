@@ -936,7 +936,7 @@ public class SQLiteSongDatabaseAccessor extends SQLiteDatabaseAccessor implement
 					long lastModifiedTime = getLastModifiedTime(chartPath);
 					String pathname = relativePath(chartPath);
 					SongData record = removeRecord(records, pathname);
-					if (record != null && record.getDate() == lastModifiedTime) {
+					if (record != null && record.getDate() == lastModifiedTime && !isCorruptedMetadata(record)) {
 						updatePreview(record, chartPath, pathname, property);
 						continue;
 					}
@@ -1305,7 +1305,7 @@ public class SQLiteSongDatabaseAccessor extends SQLiteDatabaseAccessor implement
 					final SongData record = records.get(i);
 					if (record != null && record.getPath().equals(pathname)) {
 						records.set(i, null);
-						if (record.getDate() == lastModifiedTime) {
+						if (record.getDate() == lastModifiedTime && !isCorruptedMetadata(record)) {
 							update = false;
 
 							String oldpp = record.getPreview() == null ? "" : record.getPreview();
@@ -1651,6 +1651,106 @@ public class SQLiteSongDatabaseAccessor extends SQLiteDatabaseAccessor implement
 				throw failure;
 			}
 		}
+	}
+
+	@Override
+	public boolean isCorruptedMetadata(SongData song) {
+		if (song == null) {
+			return false;
+		}
+		return ExtendedBMSDecoder.isLegacyShiftJisMojibake(song.getTitle())
+				|| ExtendedBMSDecoder.isLegacyShiftJisMojibake(song.getArtist())
+				|| ExtendedBMSDecoder.isLegacyShiftJisMojibake(song.getGenre())
+				|| ExtendedBMSDecoder.containsMojibake(song.getTitle())
+				|| ExtendedBMSDecoder.containsMojibake(song.getArtist())
+				|| ExtendedBMSDecoder.containsMojibake(song.getGenre());
+	}
+
+	@Override
+	public List<SongData> findCorruptedSongs() {
+		try {
+			List<SongData> songs = qr.query("SELECT * FROM song", songhandler);
+			if (songs == null) {
+				return Collections.emptyList();
+			}
+			List<SongData> corrupted = new ArrayList<>();
+			for (SongData song : songs) {
+				if (isCorruptedMetadata(song)) {
+					corrupted.add(song);
+				}
+			}
+			return corrupted;
+		} catch (SQLException e) {
+			Logger.getGlobal().warning("Error querying songs for corruption validation: " + e.getMessage());
+			return Collections.emptyList();
+		}
+	}
+
+	@Override
+	public int rescanCorruptedSongs() {
+		List<SongData> corrupted = findCorruptedSongs();
+		if (corrupted == null || corrupted.isEmpty()) {
+			return 0;
+		}
+		int repaired = 0;
+		ExtendedBMSDecoder decoder = new ExtendedBMSDecoder(BMSModel.LNTYPE_LONGNOTE);
+		for (SongData song : corrupted) {
+			if (song.getPath() == null) {
+				continue;
+			}
+			String oldTitle = song.getTitle();
+			String oldArtist = song.getArtist();
+			String oldGenre = song.getGenre();
+			String newTitle = null;
+			String newArtist = null;
+			String newGenre = null;
+
+			Path chartPath = Paths.get(song.getPath());
+			if (!Files.exists(chartPath)) {
+				chartPath = root.resolve(song.getPath());
+			}
+			if (Files.exists(chartPath)) {
+				try {
+					BMSModel model = decoder.decode(chartPath);
+					if (model != null && model.getTitle() != null && !model.getTitle().isEmpty()) {
+						newTitle = model.getTitle();
+						newArtist = model.getArtist() != null ? model.getArtist() : oldArtist;
+						newGenre = model.getGenre() != null ? model.getGenre() : oldGenre;
+					}
+				} catch (Exception e) {
+					Logger.getGlobal().warning("Failed to decode corrupted song at " + song.getPath() + ": " + e.getMessage());
+				}
+			}
+
+			// ファイルから値を得られない場合は、既知の従来Shift_JISパターンから復旧を試みる。
+			// If decoding yields no value, try recovery from known legacy Shift_JIS patterns.
+			if (newTitle == null && ExtendedBMSDecoder.isLegacyShiftJisMojibake(oldTitle)) {
+				newTitle = ExtendedBMSDecoder.tryRecoverShiftJisMojibake(oldTitle);
+			}
+			if (newArtist == null && ExtendedBMSDecoder.isLegacyShiftJisMojibake(oldArtist)) {
+				newArtist = ExtendedBMSDecoder.tryRecoverShiftJisMojibake(oldArtist);
+			}
+			if (newGenre == null && ExtendedBMSDecoder.isLegacyShiftJisMojibake(oldGenre)) {
+				newGenre = ExtendedBMSDecoder.tryRecoverShiftJisMojibake(oldGenre);
+			}
+
+			String repairedTitle = newTitle != null ? newTitle : oldTitle;
+			String repairedArtist = newArtist != null ? newArtist : oldArtist;
+			String repairedGenre = newGenre != null ? newGenre : oldGenre;
+			if (!java.util.Objects.equals(repairedTitle, oldTitle)
+					|| !java.util.Objects.equals(repairedArtist, oldArtist)
+					|| !java.util.Objects.equals(repairedGenre, oldGenre)) {
+				try {
+					qr.update("UPDATE song SET title = ?, artist = ?, genre = ? WHERE path = ?",
+							repairedTitle, repairedArtist, repairedGenre,
+							song.getPath());
+					repaired++;
+				} catch (SQLException e) {
+					Logger.getGlobal().warning("Failed to update repaired song in database: " + e.getMessage());
+				}
+			}
+		}
+		return repaired;
 	}
 	
 	public static interface SongDatabaseAccessorPlugin {
