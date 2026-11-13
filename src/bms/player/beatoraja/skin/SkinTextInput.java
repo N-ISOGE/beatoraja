@@ -47,6 +47,7 @@ class SkinTextInput {
 	private TextInputSession session;
 	private Runnable pendingFocus;
 	private Runnable publishImeCaret;
+	private String lastCommittedText = "";
 
 	SkinTextInput(boolean configured) {
 		this(System.getProperty("os.name", "").startsWith("Windows") ? WindowsImeBridge.create(configured)
@@ -64,9 +65,12 @@ class SkinTextInput {
 			return true;
 		}
 		if (this.target != null) {
-			pendingFocus = () -> focus(state, target);
-			commit();
-			return true;
+			if (!this.target.isSearchInput()) {
+				pendingFocus = () -> focus(state, target);
+				commit();
+				return true;
+			}
+			cancelOnFocusLoss();
 		}
 		StringWriter bound = target.getWriter().bind(state);
 		if (bound == null) return false;
@@ -79,7 +83,9 @@ class SkinTextInput {
 		ensureTextField(state, stage, Math.max(1, Math.round(target.region.height)));
 		updateBounds(target);
 		style.fontColor = target.color;
-		textField.setText(target.getInputText(state));
+		String current = target.getInputText(state);
+		lastCommittedText = current != null ? current : "";
+		textField.setText(lastCommittedText);
 		textField.setVisible(true);
 		stage.setKeyboardFocus(textField);
 		textField.setCursorPosition(textField.getText().length());
@@ -123,6 +129,8 @@ class SkinTextInput {
 		completeCommit();
 	}
 
+	TextField getTextField() { return textField; }
+
 	private void completeCommit() {
 		if (target == null || textField == null || committing) {
 			return;
@@ -135,33 +143,56 @@ class SkinTextInput {
 		Runnable next = pendingFocus;
 		pendingFocus = null;
 		String value = session != null && session.usesIme() ? session.state().text() : field.getText();
+		boolean committed = false;
 		TextInputDiagnostics.editor("writer-submit", session, field.getText(), value);
 		try {
 			writer.set(owner, value);
 			TextInputDiagnostics.editor("writer-returned", session, field.getText(), value);
 			current.setText(value);
+			lastCommittedText = value;
+			committed = true;
 		} catch (RuntimeException | Error failure) {
 			TextInputDiagnostics.failure("writer-failure", session != null ? session.id() : 0, failure);
 			throw failure;
 		} finally {
-			target = null;
-			writer = null;
-			try {
-				try { if (session != null) session.close(); }
-				finally {
-					session = null;
+			releaseInput(committed);
+		}
+		if (next != null) next.run();
+	}
+
+	/** 明示的な取り消し。元の値に戻し、予約済みの IME コールバックを閉じる。 / Explicit cancellation restores the original value and closes queued IME callbacks. */
+	void cancelOnFocusLoss() {
+		if (target == null || committing) return;
+		committing = true;
+		commitRequested = false;
+		pendingFocus = null;
+		try { target.setText(lastCommittedText); }
+		finally { releaseInput(false); }
+	}
+
+	private void releaseInput(boolean keepEdit) {
+		MainState owner = state;
+		TextField field = textField;
+		target = null;
+		writer = null;
+		try {
+			try { if (session != null) session.close(); }
+			finally {
+				session = null;
+				try {
+					if (!keepEdit) field.setText(lastCommittedText);
 					field.setVisible(false);
 					field.getOnscreenKeyboard().close();
+				} finally {
 					Stage stage = owner != null ? owner.getStage() : null;
 					if (stage != null && stage.getKeyboardFocus() == field) stage.setKeyboardFocus(null);
 				}
-			} finally {
-				try {
-					if (owner != null) owner.main.getInputProcessor().getKeyBoardInputProcesseor().setTextInputMode(false);
-				} finally { committing = false; }
 			}
+		} finally {
+			try {
+				if (owner != null) owner.main.getInputProcessor().getKeyBoardInputProcesseor().setTextInputMode(false);
+			} finally { committing = false; }
 		}
-		if (next != null) next.run();
 	}
 
 	boolean isFinishing() { return session != null && session.isFinishing() && !session.isFinished(); }
@@ -203,8 +234,14 @@ class SkinTextInput {
 
 	void commitIfOutside(int x, int y) {
 		if (target != null && !getBounds(target).contains(x, y)) {
-			commit();
+			finishFocusLoss();
 		}
+	}
+
+	private void finishFocusLoss() {
+		// 検索の取り消しは入力欄の約束で、ネイティブ IME の実装には依存しない。 / Search cancellation is a field contract, independent of the native IME backend.
+		if (target != null && target.isSearchInput()) cancelOnFocusLoss();
+		else commit();
 	}
 
 	boolean isFocused(SkinText text) {
@@ -218,11 +255,10 @@ class SkinTextInput {
 	void dispose() {
 		pendingFocus = null;
 		try {
-			// Screen disposal must not wait for a future native finish acknowledgement.
-			if (session != null && session.usesIme()) {
+			if (target != null && target.isSearchInput()) cancelOnFocusLoss();
+			else if (session != null && session.usesIme()) {
 				try { session.drain(); } finally { completeCommit(); }
-			}
-			else commit();
+			} else commit();
 		}
 		finally { disposeResources(); }
 	}
@@ -249,6 +285,7 @@ class SkinTextInput {
 			selectionTexture.dispose();
 			selectionTexture = null;
 		}
+		style = null;
 	}
 
 	private Stage ensureStage(MainState state) {
@@ -328,6 +365,11 @@ class SkinTextInput {
 				@Override protected InputListener createInputListener() {
 					return new TextFieldClickListener() {
 						@Override public boolean keyDown(InputEvent event, int keycode) {
+							// Esc の取り消しは入力欄の約束。変換中の Esc だけは IME に任せる。 / Esc cancellation is a field contract; only Esc during composition is left to the IME.
+							if (keycode == com.badlogic.gdx.Input.Keys.ESCAPE && (session == null || !session.isComposing())) {
+								cancelOnFocusLoss();
+								return true;
+							}
 							if (session != null && session.usesIme()) return true;
 							try { return super.keyDown(event, keycode); }
 							catch (SkinTextClipboard.WriteFailure e) { return true; }
@@ -366,7 +408,7 @@ class SkinTextInput {
 				public void keyboardFocusChanged(FocusEvent event, com.badlogic.gdx.scenes.scene2d.Actor actor, boolean focused) {
 					if (!focused) {
 						TextInputDiagnostics.editor("editor-focus-lost", session, textField.getText(), null);
-						commit();
+						finishFocusLoss();
 					}
 				}
 			});

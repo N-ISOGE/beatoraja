@@ -72,7 +72,7 @@ public final class Lwjgl3TextInputTest {
             check(field.getSelection().equals("\u672c") && field.getText().equals("\u65e5\u672c\u8a9e"), "Reclick preserves draft/cursor/selection");
             float height = field.getPrefHeight();
             editor.focus(state, b);
-            check(first.get().equals("\u65e5\u672c\u8a9e") && writes.get() == 1, "Switch commits previous target exactly once");
+            check("\u65e5\u672c\u8a9e".equals(first.get()) && writes.get() == 1, "General field switch submits the previous target exactly once");
             check(field.getText().equals("B") && field.getPrefHeight() > height, "Font metrics refresh with field size");
             key(handle, GLFW.GLFW_KEY_ENTER, GLFW.GLFW_PRESS);
             characters(handle, "\ud842\udfb7"); // supplementary Japanese code point, after Enter in the same queue batch
@@ -85,10 +85,12 @@ public final class Lwjgl3TextInputTest {
             editor.focus(state, a);
             key(handle, GLFW.GLFW_KEY_ESCAPE, GLFW.GLFW_PRESS); source.update();
             input.getKeyBoardInputProcesseor().poll(100000);
-            check(!input.isControlKeyPressed(KeyBoardInputProcesseor.ControlKeys.ESCAPE) && editor.isFocused(a),
-                    "Escape without committed text cannot navigate game or submit editor");
+            check(!input.isControlKeyPressed(KeyBoardInputProcesseor.ControlKeys.ESCAPE)
+                    && !editor.isFocused(a) && !field.isVisible() && "\u65e5\u672c\u8a9e".equals(first.get()) && writes.get() == 1,
+                    "Escape cancels this draft without navigating game or submitting again");
             key(handle, GLFW.GLFW_KEY_ESCAPE, GLFW.GLFW_RELEASE); source.update();
 
+            check(editor.focus(state, a), "Editor reopens after Escape cancellation");
             var memory = new MemoryClipboard();
             field.setClipboard(new SkinTextClipboard(() -> memory));
             memory.value = "\u65e5\u672c\u8a9e\r\nabc"; field.selectAll(); shortcut(source, handle, GLFW.GLFW_KEY_V);
@@ -111,7 +113,7 @@ public final class Lwjgl3TextInputTest {
             check(field.getText().isEmpty(), "Backspace removes supplementary character as a pair");
             key(handle, GLFW.GLFW_KEY_BACKSPACE, GLFW.GLFW_RELEASE); source.update();
             field.setText("focus-out"); state.getStage().setKeyboardFocus(null);
-            check(first.get().equals("focus-out") && !field.isVisible(), "Scene2D focus-out commits");
+            check("focus-out".equals(first.get()) && writes.get() == 2 && !field.isVisible(), "General Scene2D focus-out submits exactly once");
 
             var selection = new AtomicReference<>("first");
             var submitted = new AtomicReference<String>();
@@ -128,7 +130,7 @@ public final class Lwjgl3TextInputTest {
             field.setText("12.5");
             selection.set("second");
             state.getStage().setKeyboardFocus(null);
-            check(submitted.get().equals("first:12.5"), "Focus-out uses the destination bound at edit start");
+            check(submitted.get().equals("first:12.5"), "General focus-out submits to the destination bound at edit start");
 
             var failed = text("unchanged", 32, (s, value) -> { throw new IllegalStateException("Expected writer failure"); });
             editor.focus(state, failed);
@@ -139,12 +141,56 @@ public final class Lwjgl3TextInputTest {
             key(handle, GLFW.GLFW_KEY_DOWN, GLFW.GLFW_PRESS); source.update(); input.getKeyBoardInputProcesseor().poll(200000);
             check(input.getControlKeyState(KeyBoardInputProcesseor.ControlKeys.DOWN), "Gameplay controls restored after failure");
             key(handle, GLFW.GLFW_KEY_DOWN, GLFW.GLFW_RELEASE); source.update();
+            searchFocusLoss(state, source, handle);
             mockIme(state, source, handle);
             windowsIme(state);
             x11Ime(state, source, handle, input);
             if (Boolean.getBoolean("beatoraja.test.macosIme")) macIme(state);
             resultEnter(main, input, source, handle);
         } finally { editor.dispose(); state.dispose(); }
+    }
+
+    private static void searchFocusLoss(MainState state, PollingLwjgl3Input source, long handle) {
+        var factory = text("", 32, bms.player.beatoraja.skin.property.StringPropertyFactory.getStringWriter(30));
+        check(factory.isSearchInput(), "Built-in writer 30 identifies search without a public setting");
+        for (boolean nativeSession : new boolean[]{false, true}) {
+            var bridge = nativeSession ? new MockImeBridge() : null;
+            var editor = new SkinTextInput(nativeSession ? bridge : ImeBridge.NONE);
+            var writes = new AtomicInteger(); var value = new AtomicReference<String>();
+            var target = text("original", 32, (s, v) -> { writes.incrementAndGet(); value.set(v); }, true);
+            try {
+                check(editor.focus(state, target), "Search editor opens");
+                TextField field = editor.getTextField(); field.setText("draft");
+                if (nativeSession) { bridge.preedit("discard"); state.getStage().act(0); }
+                else { key(handle, GLFW.GLFW_KEY_ENTER, GLFW.GLFW_PRESS); source.update(); }
+                var oldSink = nativeSession ? bridge.sink : null; long oldId = nativeSession ? bridge.id : 0;
+                state.getStage().setKeyboardFocus(null); state.getStage().act(0);
+                check(writes.get() == 0 && !editor.isActive() && "original".equals(field.getText()),
+                        "Search focus-out cancels draft and any queued Enter for either backend");
+                if (nativeSession) {
+                    oldSink.committed(oldId, new TextInputSession.EditorState("late", 4, 4));
+                    state.getStage().act(0);
+                    check(writes.get() == 0 && bridge.closes == 1, "Cancelled search rejects late native callbacks");
+                } else { key(handle, GLFW.GLFW_KEY_ENTER, GLFW.GLFW_RELEASE); source.update(); }
+                check(editor.focus(state, target), "Search reopens after cancellation");
+                field.setText("submitted"); editor.commit();
+                if (nativeSession) { bridge.commit("submitted"); bridge.done(); state.getStage().act(0); }
+                check(writes.get() == 1 && "submitted".equals(value.get()), "Explicit search submit remains exactly once");
+                check(editor.focus(state, target), "Search reopens for Escape");
+                field.setText("escape-draft"); state.getStage().act(0);
+                if (nativeSession) {
+                    bridge.preedit("composing"); state.getStage().act(0);
+                    key(handle, GLFW.GLFW_KEY_ESCAPE, GLFW.GLFW_PRESS); source.update();
+                    check(editor.isActive(), "Escape during native composition is left to the IME");
+                    key(handle, GLFW.GLFW_KEY_ESCAPE, GLFW.GLFW_RELEASE); source.update();
+                    bridge.sink.cancelled(bridge.id); state.getStage().act(0);
+                }
+                key(handle, GLFW.GLFW_KEY_ESCAPE, GLFW.GLFW_PRESS); source.update();
+                check(writes.get() == 1 && !editor.isActive() && "submitted".equals(field.getText()),
+                        "Escape cancels the search draft for either backend");
+                key(handle, GLFW.GLFW_KEY_ESCAPE, GLFW.GLFW_RELEASE); source.update();
+            } finally { editor.dispose(); }
+        }
     }
 
     private static void resultEnter(MainController main, BMSPlayerInputProcessor input, PollingLwjgl3Input source,
@@ -479,7 +525,11 @@ public final class Lwjgl3TextInputTest {
     }
 
     private static SkinText text(String initial, int height, bms.player.beatoraja.skin.property.StringWriter writer) {
+        return text(initial, height, writer, false);
+    }
+    private static SkinText text(String initial, int height, bms.player.beatoraja.skin.property.StringWriter writer, boolean search) {
         var result = new SkinText((bms.player.beatoraja.skin.property.StringProperty)null) {
+            @Override boolean isSearchInput() { return search || super.isSearchInput(); }
             @Override public void prepareFont(String value) { }
             @Override protected void prepareText(String value) { }
             @Override public void draw(Skin.SkinObjectRenderer renderer, float x, float y) { }
