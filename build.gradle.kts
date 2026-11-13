@@ -233,6 +233,7 @@ val regressionClasses = listOf(
     "bms.player.beatoraja.external.obs.ObsWebSocketTest",
     "bms.player.beatoraja.external.obs.ObsConfigCompatibilityTest",
     "bms.player.beatoraja.BmsRootConfigTest",
+    "bms.player.beatoraja.LocalTableFileTest",
     "bms.player.beatoraja.play.ControlInputProcessorTest",
     "bms.player.beatoraja.skin.NotesOffsetCenterConfigTest",
     "bms.player.beatoraja.skin.json.NotesOffsetCenterLoaderTest",
@@ -309,6 +310,7 @@ val regressionClasses = listOf(
     "bms.player.beatoraja.audio.PortAudioStreamLifecycleTest",
     "bms.player.beatoraja.video.FFmpegProcessorLifecycleTest",
     "bms.player.beatoraja.launcher.ConfigurationRangeTest",
+    "bms.player.beatoraja.config.KeyConfigurationControllerAssignmentTest",
     "bms.player.beatoraja.launcher.SkinConfigurationViewTest",
     "bms.player.beatoraja.skin.SkinResourceLifecycleTest",
     "bms.player.beatoraja.skin.BitmapFontCacheTest",
@@ -351,6 +353,13 @@ val regressionTasks = regressionClasses.map { className ->
             doFirst { args(temporaryDir.resolve("run-${System.nanoTime()}").absolutePath) }
         }
     }
+}
+tasks.register<JavaExec>("tableEditorWindowTest") {
+    group = "verification"
+    description = "Open the standalone table editor with JavaFX (requires a desktop session)."
+    dependsOn(tasks.testClasses)
+    classpath = sourceSets.test.get().runtimeClasspath
+    mainClass.set("bms.player.beatoraja.launcher.TableEditorWindowTest")
 }
 val regressionTest by tasks.registering {
     group = "verification"
