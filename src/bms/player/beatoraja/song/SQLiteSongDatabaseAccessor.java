@@ -900,7 +900,7 @@ public class SQLiteSongDatabaseAccessor extends SQLiteDatabaseAccessor implement
 							model = bmsondecoder.decode(chartPath);
 						} else {
 							if (bmsdecoder == null) {
-								bmsdecoder = new BMSDecoder(BMSModel.LNTYPE_LONGNOTE);
+								bmsdecoder = new ExtendedBMSDecoder(BMSModel.LNTYPE_LONGNOTE);
 							}
 							model = bmsdecoder.decode(chartPath);
 						}
@@ -1402,9 +1402,9 @@ public class SQLiteSongDatabaseAccessor extends SQLiteDatabaseAccessor implement
 							.decode(new ChartInformation(source, BMSModel.LNTYPE_LONGNOTE, null));
 				}
 				if (SongArchives.isVirtualPath(path)) {
-					return new BMSDecoder(BMSModel.LNTYPE_LONGNOTE).decode(SongArchives.readEntry(path), false, null);
+					return new ExtendedBMSDecoder(BMSModel.LNTYPE_LONGNOTE).decode(SongArchives.readEntry(path), false, null);
 				}
-				return new BMSDecoder(BMSModel.LNTYPE_LONGNOTE).decode(path);
+				return new ExtendedBMSDecoder(BMSModel.LNTYPE_LONGNOTE).decode(path);
 			} catch (Exception | LinkageError e) {
 				Logger.getGlobal().severe("Error while decoding chart at path: " + pathname + e.getMessage());
 				return null;
