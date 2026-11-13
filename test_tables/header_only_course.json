@@ -1,0 +1,13 @@
+{
+  "name": "RKQZ",
+  "symbol": "BFXH",
+  "tag": "BFXH_",
+  "data_url": [],
+  "course": [[{
+    "name": "주부즈어",
+    "constraint": [],
+    "charts": [
+      {"title": "처노어루", "md5": "7006ab709848ae5f28f31c1fa44ea267"}
+    ]
+  }]]
+}
