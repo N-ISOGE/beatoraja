@@ -15,6 +15,7 @@ import bms.player.beatoraja.ir.RankingData;
 import bms.player.beatoraja.play.BMSPlayerRule;
 import bms.player.beatoraja.play.AbstractGrooveGauge;
 import bms.player.beatoraja.play.bga.BGAProcessor;
+import bms.player.beatoraja.song.ExtendedBMSDecoder;
 import bms.player.beatoraja.song.SongData;
 import bms.player.beatoraja.song.SongResource;
 import bms.player.beatoraja.song.SongResources;
@@ -222,7 +223,9 @@ public final class PlayerResource {
 
 	private BMSModel loadBMSModel(ChartInformation info, boolean forPlay) {
 		if (forPlay) chartRuleParameters = null;
-		ChartDecoder decoder = info.source != null ? ChartDecoder.getDecoder(info.source) : ChartDecoder.getDecoder(info.path);
+		// 拡張BMSデコーダ（文字コード自動判別・#CHARSET対応）を使用
+		// Use ExtendedBMSDecoder with encoding auto-detection and #CHARSET support
+		ChartDecoder decoder = ExtendedBMSDecoder.getDecoder(info);
 		if(decoder == null) {
 			return null;
 		}
