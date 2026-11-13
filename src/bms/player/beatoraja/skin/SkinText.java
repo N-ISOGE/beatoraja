@@ -24,6 +24,14 @@ public abstract class SkinText extends SkinObject {
     public interface CachedTextLayout {
     }
 
+    /**
+     * 組み込みの searchword writer(スキン文字列 ID 30)か。他の編集欄は upstream どおり提出する。
+     * Built-in searchword writer (skin string ID 30); other editors keep upstream submission.
+     */
+    boolean isSearchInput() {
+        return writer == StringPropertyFactory.getStringWriter(30);
+    }
+
     private int align = ALIGN_LEFT;
 	public static final int ALIGN_LEFT = 0;
     public static final int ALIGN_CENTER = 1;
