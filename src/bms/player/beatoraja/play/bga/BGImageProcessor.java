@@ -22,7 +22,7 @@ public class BGImageProcessor {
 			long estimatedTextureBytes, int songResourceCount) {
 	}
 	
-	public static final String[] pic_extension = { "jpg", "jpeg", "gif", "bmp", "png", "tga" };
+	public static final String[] pic_extension = { "jpg", "jpeg", "gif", "bmp", "png", "tga", "webp" };
 	/**
 	 * BGイメージ
 	 */
