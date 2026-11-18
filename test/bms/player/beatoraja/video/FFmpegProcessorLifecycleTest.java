@@ -132,6 +132,9 @@ public final class FFmpegProcessorLifecycleTest {
                 (proxy, method, args) -> switch (method.getName()) {
                     case "openStream" -> input.open();
                     case "displayPath", "name", "cacheKey" -> "synthetic & movie.mp4";
+                    // Non-local resource of unknown size, as the SongResource defaults report.
+                    case "localPath" -> java.util.Optional.empty();
+                    case "size" -> -1L;
                     default -> throw new UnsupportedOperationException(method.getName());
                 });
     }
