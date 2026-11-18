@@ -3,6 +3,8 @@ package bms.player.beatoraja;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
 import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Path;
 import java.nio.IntBuffer;
@@ -145,9 +147,17 @@ public class PixmapResourcePool extends ResourcePool<String, PixmapResourcePool.
 	}
 
 	protected PixmapResource convert(PixmapResource resource) {
-		Pixmap pixmap = convert(resource.getPixmap());
-		if (pixmap == resource.getPixmap()) {
+		Pixmap original = resource.getPixmap();
+		int width = original.getWidth();
+		int height = original.getHeight();
+		Pixmap pixmap = convert(original);
+		if (pixmap == original) {
 			return resource;
+		}
+		// Sprite-sheet layout stays valid only while the converted image keeps its size.
+		if (pixmap.getWidth() == width && pixmap.getHeight() == height) {
+			return new PixmapResource(pixmap, resource.getFrameCount(), resource.getFrameWidth(),
+					resource.getFrameHeight(), resource.getColumns(), resource.getRows());
 		}
 		return new PixmapResource(pixmap);
 	}
@@ -190,17 +200,20 @@ public class PixmapResourcePool extends ResourcePool<String, PixmapResourcePool.
 				return null;
 			}
 			String lower = resource.name().toLowerCase(Locale.ROOT);
-			if (lower.endsWith(".webp")) {
-				return loadWebpWithFFmpeg(resource);
-			}
 			// libGDX supplies the decoder for these formats; cache only this entry.
+			// The local loader still checks the header before using the native decoder.
 			if (lower.endsWith(".cim") || lower.endsWith(".tga")) {
 				return loadLocalPictureResource(resource.materialize().toString());
 			}
+			byte[] bytes;
 			try (InputStream input = resource.openStream()) {
-				BufferedImage image = ImageIO.read(input);
-				return image != null ? new PixmapResource(toPixmap(image)) : null;
+				bytes = readLimited(input, MAX_IMAGE_BYTES);
 			}
+			if (lower.endsWith(".webp") || isWebpSignature(bytes)) {
+				return loadWebpWithFFmpeg(bytes, resource.displayPath());
+			}
+			BufferedImage image = ImageIO.read(new ByteArrayInputStream(bytes));
+			return image != null ? new PixmapResource(toPixmap(image)) : null;
 		} catch (Throwable e) {
 			Logger.getGlobal().warning("BGAファイル読み込み失敗。" + resource.displayPath() + " : " + e.getMessage());
 			return null;
@@ -217,9 +230,12 @@ public class PixmapResourcePool extends ResourcePool<String, PixmapResourcePool.
 
 		// JPEGファイルはlibGDXのネイティブデコーダー(jpgd)を使用しない。
 		// 一部のJPEGファイルでネイティブコードのassert()が発動してプロセスごとクラッシュするため。
+		// Extensions in BMS packages are unreliable, so JPEG/WebP headers are also blocked.
+		// Headerless TGA, CIM and OS/2 BMP have no such signature and keep the native path.
 		String lower = path.toLowerCase(Locale.ROOT);
-		boolean isJpeg = lower.endsWith(".jpg") || lower.endsWith(".jpeg");
-		boolean isWebp = lower.endsWith(".webp");
+		byte[] header = readHeader(f);
+		boolean isJpeg = lower.endsWith(".jpg") || lower.endsWith(".jpeg") || isJpegSignature(header);
+		boolean isWebp = lower.endsWith(".webp") || isWebpSignature(header);
 
 		if (!isJpeg && !isWebp) {
 			try {
@@ -268,30 +284,50 @@ public class PixmapResourcePool extends ResourcePool<String, PixmapResourcePool.
 		return readers.hasNext();
 	}
 
-	private static PixmapResource loadWebpWithFFmpeg(String path) {
-		List<Pixmap> frames = new ArrayList<>();
-		try (FFmpegFrameGrabber grabber = new FFmpegFrameGrabber(path)) {
-			grabber.start();
-			Java2DFrameConverter converter = new Java2DFrameConverter();
-			Frame frame;
-			while ((frame = grabber.grabImage()) != null) {
-				BufferedImage image = converter.convert(frame);
-				if (image != null) {
-					frames.add(toPixmap(image));
-				}
-			}
-			return toSpriteSheetPixmap(frames);
-		} catch (Throwable e) {
-			frames.forEach(Pixmap::dispose);
-			Logger.getGlobal().warning("WebPファイル読み込み失敗。" + e.getMessage());
-			return null;
+	/** Upper bound for an image read fully into memory from a non-local song resource. */
+	static final int MAX_IMAGE_BYTES = 64 * 1024 * 1024;
+
+	private static final int HEADER_BYTES = 12;
+
+	static boolean isJpegSignature(byte[] header) {
+		return header.length >= 3 && (header[0] & 0xff) == 0xff && (header[1] & 0xff) == 0xd8
+				&& (header[2] & 0xff) == 0xff;
+	}
+
+	static boolean isWebpSignature(byte[] header) {
+		return header.length >= HEADER_BYTES && header[0] == 'R' && header[1] == 'I' && header[2] == 'F'
+				&& header[3] == 'F' && header[8] == 'W' && header[9] == 'E' && header[10] == 'B' && header[11] == 'P';
+	}
+
+	private static byte[] readHeader(File file) {
+		try (InputStream input = new FileInputStream(file)) {
+			return input.readNBytes(HEADER_BYTES);
+		} catch (IOException | SecurityException e) {
+			return new byte[0];
 		}
 	}
 
-	private static PixmapResource loadWebpWithFFmpeg(SongResource resource) {
-		try (InputStream input = resource.openStream()) {
-			return loadWebpWithFFmpeg(input.readAllBytes(), resource.displayPath());
+	static byte[] readLimited(InputStream input, int limit) throws IOException {
+		byte[] bytes = input.readNBytes(limit + 1);
+		if (bytes.length > limit) {
+			throw new IOException("Image exceeds " + limit + " bytes");
+		}
+		return bytes;
+	}
+
+	/** Frames of the given size that fit one sprite-sheet texture; at least one. */
+	static int maxSpriteFrames(int frameWidth, int frameHeight, int maxTextureSize) {
+		long columns = Math.max(1, maxTextureSize / Math.max(1, frameWidth));
+		long rows = Math.max(1, maxTextureSize / Math.max(1, frameHeight));
+		return (int) Math.min(Integer.MAX_VALUE, columns * rows);
+	}
+
+	private static PixmapResource loadWebpWithFFmpeg(String path) {
+		List<Pixmap> frames = new ArrayList<>();
+		try (FFmpegFrameGrabber grabber = new FFmpegFrameGrabber(path)) {
+			return grabWebpFrames(grabber, frames, path);
 		} catch (Throwable e) {
+			frames.forEach(Pixmap::dispose);
 			Logger.getGlobal().warning("WebPファイル読み込み失敗。" + e.getMessage());
 			return null;
 		}
@@ -300,16 +336,7 @@ public class PixmapResourcePool extends ResourcePool<String, PixmapResourcePool.
 	private static PixmapResource loadWebpWithFFmpeg(byte[] bytes, String name) {
 		List<Pixmap> frames = new ArrayList<>();
 		try (FFmpegFrameGrabber grabber = new FFmpegFrameGrabber(new ByteArrayInputStream(bytes))) {
-			grabber.start();
-			Java2DFrameConverter converter = new Java2DFrameConverter();
-			Frame frame;
-			while ((frame = grabber.grabImage()) != null) {
-				BufferedImage image = converter.convert(frame);
-				if (image != null) {
-					frames.add(toPixmap(image));
-				}
-			}
-			return toSpriteSheetPixmap(frames);
+			return grabWebpFrames(grabber, frames, name);
 		} catch (Throwable e) {
 			frames.forEach(Pixmap::dispose);
 			Logger.getGlobal().warning("WebPファイル読み込み失敗。" + name + " : " + e.getMessage());
@@ -317,7 +344,32 @@ public class PixmapResourcePool extends ResourcePool<String, PixmapResourcePool.
 		}
 	}
 
-	private static PixmapResource toSpriteSheetPixmap(List<Pixmap> frames) {
+	private static PixmapResource grabWebpFrames(FFmpegFrameGrabber grabber, List<Pixmap> frames, String name)
+			throws Exception {
+		grabber.start();
+		Java2DFrameConverter converter = new Java2DFrameConverter();
+		int maxTextureSize = getMaxTextureSize();
+		int maxFrames = Integer.MAX_VALUE;
+		Frame frame;
+		while ((frame = grabber.grabImage()) != null) {
+			BufferedImage image = converter.convert(frame);
+			if (image == null) {
+				continue;
+			}
+			if (frames.isEmpty()) {
+				maxFrames = maxSpriteFrames(image.getWidth(), image.getHeight(), maxTextureSize);
+			}
+			if (frames.size() >= maxFrames) {
+				Logger.getGlobal().warning("WebPのフレーム数が最大テクスチャサイズに収まらないため打ち切ります : "
+						+ name + " frames=" + frames.size() + " max=" + maxTextureSize);
+				break;
+			}
+			frames.add(toPixmap(image));
+		}
+		return toSpriteSheetPixmap(frames, maxTextureSize);
+	}
+
+	private static PixmapResource toSpriteSheetPixmap(List<Pixmap> frames, int maxTextureSize) {
 		if (frames.isEmpty()) {
 			return null;
 		}
@@ -329,7 +381,6 @@ public class PixmapResourcePool extends ResourcePool<String, PixmapResourcePool.
 			frameHeight = Math.max(frameHeight, frame.getHeight());
 		}
 
-		int maxTextureSize = getMaxTextureSize();
 		int maxColumns = Math.max(1, maxTextureSize / Math.max(1, frameWidth));
 		int maxRows = Math.max(1, maxTextureSize / Math.max(1, frameHeight));
 		int[] grid = getSpriteSheetGrid(frames.size(), frameWidth, frameHeight, maxColumns, maxRows);
