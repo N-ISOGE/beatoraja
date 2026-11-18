@@ -833,10 +833,12 @@ public class PortAudioDriver extends AbstractAudioDriver<PCM> implements Runnabl
 
 	@Override
 	protected void setVolume(AudioElement<PCM> id, float volume) {
-		for (MixerInput input : inputs) {
-			if (input.id == id.id) {
-				input.volume = volume;
-				break;
+		synchronized (inputs) {
+			for (MixerInput input : inputs) {
+				if (input.id == id.id) {
+					input.volume = volume;
+					break;
+				}
 			}
 		}
 	}

@@ -146,7 +146,27 @@ public abstract class PCM<T> {
 	 * @return トリミングしたPCM
 	 */
 	public abstract PCM<T> slice(long starttime, long duration);
-	
+
+	/**
+	 * {@link #slice}の範囲を、このPCM内のインターリーブ済みサンプル位置 {start, length} で返す。
+	 * Times are clamped to [0, length of this PCM] and computed in long, so negative or
+	 * overflowing values from malformed charts never index outside the sample buffer.
+	 * duration 0 keeps its meaning of "until the end".
+	 */
+	protected final int[] sliceRange(long starttime, long duration) {
+		final long total = ((long) len) * 1000000 / ((long) sampleRate * channels);
+		starttime = Math.min(Math.max(starttime, 0), total);
+		if (duration == 0 || duration > total - starttime) {
+			duration = total - starttime;
+		}
+		if (duration < 0) {
+			duration = 0;
+		}
+		final long start = (starttime * sampleRate / 1000000) * channels;
+		final long length = (duration * sampleRate / 1000000) * channels;
+		return new int[] { (int) start, (int) Math.min(length, len - start) };
+	}
+
 	public abstract boolean validate();
 	
 	protected static ByteBuffer getDirectByteBuffer(int capacity) {
