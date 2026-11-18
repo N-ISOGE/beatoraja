@@ -205,14 +205,9 @@ public interface AudioDriver extends Disposable {
 		if (result.isEmpty()) {
 			// Charts made on case-insensitive file systems often differ in case only.
 			Path parent = p.getParent() != null ? p.getParent() : Paths.get("");
-			try (var children = Files.list(parent)) {
-				List<Path> files = children.filter(Files::isRegularFile).toList();
+			try {
 				for (String candidate : candidateNames(name, ext, exts)) {
-					for (Path child : files) {
-						if (child.getFileName().toString().equalsIgnoreCase(candidate)) {
-							result.add(child);
-						}
-					}
+					result.addAll(DirectoryListings.files(parent, candidate));
 				}
 			} catch (Exception ignored) {
 			}
@@ -259,13 +254,8 @@ public interface AudioDriver extends Disposable {
 			}
 			if (result.isEmpty()) {
 				// Archive entries and case-sensitive file systems keep the chart author's case.
-				List<SongResource> children = resource.parent().list();
 				for (String candidate : candidateNames(name, extension, extensions)) {
-					for (SongResource child : children) {
-						if (child.name().equalsIgnoreCase(candidate) && !child.isDirectory()) {
-							result.add(child);
-						}
-					}
+					result.addAll(DirectoryListings.children(resource.parent(), candidate));
 				}
 			}
 		} catch (Exception ignored) {
