@@ -5,6 +5,7 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Locale;
 import java.util.logging.Logger;
 
 import org.jflac.FLACDecoder;
@@ -145,7 +146,27 @@ public abstract class PCM<T> {
 	 * @return トリミングしたPCM
 	 */
 	public abstract PCM<T> slice(long starttime, long duration);
-	
+
+	/**
+	 * {@link #slice}の範囲を、このPCM内のインターリーブ済みサンプル位置 {start, length} で返す。
+	 * Times are clamped to [0, length of this PCM] and computed in long, so negative or
+	 * overflowing values from malformed charts never index outside the sample buffer.
+	 * duration 0 keeps its meaning of "until the end".
+	 */
+	protected final int[] sliceRange(long starttime, long duration) {
+		final long total = ((long) len) * 1000000 / ((long) sampleRate * channels);
+		starttime = Math.min(Math.max(starttime, 0), total);
+		if (duration == 0 || duration > total - starttime) {
+			duration = total - starttime;
+		}
+		if (duration < 0) {
+			duration = 0;
+		}
+		final long start = (starttime * sampleRate / 1000000) * channels;
+		final long length = (duration * sampleRate / 1000000) * channels;
+		return new int[] { (int) start, (int) Math.min(length, len - start) };
+	}
+
 	public abstract boolean validate();
 	
 	protected static ByteBuffer getDirectByteBuffer(int capacity) {
@@ -154,7 +175,10 @@ public abstract class PCM<T> {
 	}
 
 	static class PCMLoader {
-		
+
+		/** Largest WAV data chunk allocated up front from its declared length. */
+		static final int MAX_PREALLOCATED_WAV_BYTES = 64 * 1024 * 1024;
+
 		ByteBuffer pcm;
 		int channels = 0;
 		int sampleRate = 0;
@@ -171,39 +195,98 @@ public abstract class PCM<T> {
 		}
 
 		public void loadPCM(SongResource resource) throws IOException {
+			IOException failure;
 			try (InputStream input = resource.openStream()) {
 				loadPCM(input, resource.displayPath());
+				return;
+			} catch (IOException e) {
+				failure = e;
+			}
+			// The extension did not match the content: retry once with the container signature.
+			String detected;
+			try (InputStream input = resource.openStream()) {
+				detected = detectFormat(input.readNBytes(12));
+			}
+			if (detected == null || resource.name().toLowerCase(Locale.ROOT).endsWith(detected)) {
+				throw failure;
+			}
+			try (InputStream input = resource.openStream()) {
+				loadPCM(input, resource.displayPath(), detected);
 			}
 		}
 
+		/** Audio extension implied by the first bytes, or null when no supported container matches. */
+		static String detectFormat(byte[] h) {
+			if (h.length >= 12 && h[0] == 'R' && h[1] == 'I' && h[2] == 'F' && h[3] == 'F'
+					&& h[8] == 'W' && h[9] == 'A' && h[10] == 'V' && h[11] == 'E') {
+				return ".wav";
+			}
+			if (h.length >= 4 && h[0] == 'O' && h[1] == 'g' && h[2] == 'g' && h[3] == 'S') {
+				return ".ogg";
+			}
+			if (h.length >= 4 && h[0] == 'f' && h[1] == 'L' && h[2] == 'a' && h[3] == 'C') {
+				return ".flac";
+			}
+			if (h.length >= 3 && h[0] == 'I' && h[1] == 'D' && h[2] == '3') {
+				return ".mp3";
+			}
+			// MPEG audio frame sync with a valid layer, bitrate index and sample-rate index.
+			if (h.length >= 3 && (h[0] & 0xff) == 0xff && (h[1] & 0xe0) == 0xe0 && (h[1] & 0x06) != 0
+					&& (h[2] & 0xf0) != 0xf0 && (h[2] & 0x0c) != 0x0c) {
+				return ".mp3";
+			}
+			return null;
+		}
+
 		public void loadPCM(InputStream source, String name) throws IOException {
+			loadPCM(source, name, null);
+		}
+
+		private void loadPCM(InputStream source, String name, String format) throws IOException {
 			// final long time = System.nanoTime();
 			pcm = null;
 
-			final String lowerName = name.toLowerCase();
+			final String lowerName = format != null ? format : name.toLowerCase(Locale.ROOT);
 			if (lowerName.endsWith(".wav")) {
 				try (WavInputStream input = new WavInputStream(new BufferedInputStream(source))) {
 					switch(input.type) {
 						case 1, 3 -> {
+							// Reject headers that would divide by zero or decode as silence/garbage.
+							if (input.channels <= 0 || input.sampleRate <= 0
+									|| (input.bitsPerSample != 8 && input.bitsPerSample != 16
+											&& input.bitsPerSample != 24 && input.bitsPerSample != 32)) {
+								throw new IOException(name + " invalid WAV format : channels=" + input.channels
+										+ " sampleRate=" + input.sampleRate + " bitsPerSample=" + input.bitsPerSample);
+							}
 							channels = input.channels;
 							sampleRate = input.sampleRate;
 							bitsPerSample = input.bitsPerSample;
-							
-							if(bitsPerSample == 16) {
-								pcm = getDirectByteBuffer(input.dataRemaining);
+
+							// A declared data length is only a hint: truncated files end early and
+							// streaming writers leave 0 or 0xFFFFFFFF. Never pre-allocate more than the cap.
+							final int declared = input.dataRemaining;
+							if(bitsPerSample == 16 && declared > 0 && declared <= MAX_PREALLOCATED_WAV_BYTES) {
+								pcm = getDirectByteBuffer(declared);
 								StreamUtils.copyStream(input, pcm);
+								// WavInputStream counts down what it delivered; a short file stops early.
+								pcm.limit(declared - input.dataRemaining);
 							} else {
-								OptimizedByteArrayOutputStream output = new OptimizedByteArrayOutputStream(input.dataRemaining);
+								OptimizedByteArrayOutputStream output = new OptimizedByteArrayOutputStream(
+										declared > 0 && declared <= MAX_PREALLOCATED_WAV_BYTES ? declared : 65536);
 								StreamUtils.copyStream(input, output);
-								pcm = ByteBuffer.wrap(output.getBuffer()).order(ByteOrder.LITTLE_ENDIAN);
-								pcm.limit(output.size());
+								if (bitsPerSample == 16) {
+									pcm = getDirectByteBuffer(output.size()).put(output.getBuffer(), 0, output.size());
+								} else {
+									pcm = ByteBuffer.wrap(output.getBuffer()).order(ByteOrder.LITTLE_ENDIAN);
+									pcm.limit(output.size());
+								}
 							}
 						}
 						// mp3
 						case 85 -> {
 							try {
-								Bitstream bitstream = new Bitstream(new ByteArrayInputStream(
-										StreamUtils.copyStreamToByteArray(input, input.dataRemaining)));
+								Bitstream bitstream = new Bitstream(new ByteArrayInputStream(StreamUtils.copyStreamToByteArray(
+										input, Math.min(input.dataRemaining, MAX_PREALLOCATED_WAV_BYTES))));
 								ByteArrayOutputStream output = new ByteArrayOutputStream(4096);
 								MP3Decoder decoder = new MP3Decoder();
 								OutputBuffer outputBuffer = null;
@@ -481,39 +564,65 @@ public abstract class PCM<T> {
 					throw new RuntimeException("Invalid wave file header: " + p.toString());
 
 				int fmtChunkLength = seekToChunk('f', 'm', 't', ' ');
+				if (fmtChunkLength < 16)
+					throw new IOException("Invalid fmt chunk length: " + fmtChunkLength);
 
-				type = read() & 0xff | (read() & 0xff) << 8;
+				type = readByte() | readByte() << 8;
 
-				channels = read() & 0xff | (read() & 0xff) << 8;
+				channels = readByte() | readByte() << 8;
 
-				sampleRate = read() & 0xff | (read() & 0xff) << 8 | (read() & 0xff) << 16 | (read() & 0xff) << 24;
+				sampleRate = readByte() | readByte() << 8 | readByte() << 16 | readByte() << 24;
 
 				skipFully(6);
 
-				bitsPerSample = read() & 0xff | (read() & 0xff) << 8;
+				bitsPerSample = readByte() | readByte() << 8;
 
 				skipFully(fmtChunkLength - 16);
+				skipPad(fmtChunkLength);
 
-				dataRemaining = seekToChunk('d', 'a', 't', 'a');
+				int dataLength = seekToChunk('d', 'a', 't', 'a');
+				// 0xFFFFFFFF (or any size beyond int) is written by streaming encoders: read until EOF.
+				dataRemaining = dataLength < 0 ? Integer.MAX_VALUE : dataLength;
 			} catch (Throwable ex) {
 				StreamUtils.closeQuietly(this);
 				throw new RuntimeException("Error reading WAV file: " + p.toString(), ex);
 			}
 		}
 
+		/** Reads one header byte; end of file inside a header is an error, not a 0xff value. */
+		private int readByte() throws IOException {
+			int value = read();
+			if (value < 0)
+				throw new EOFException("Truncated WAV header");
+			return value;
+		}
+
 		private int seekToChunk(char c1, char c2, char c3, char c4) throws IOException {
 			while (true) {
-				boolean found = read() == c1;
-				found &= read() == c2;
-				found &= read() == c3;
-				found &= read() == c4;
-				int chunkLength = read() & 0xff | (read() & 0xff) << 8 | (read() & 0xff) << 16 | (read() & 0xff) << 24;
-				if (chunkLength == -1)
-					throw new IOException("Chunk not found: " + c1 + c2 + c3 + c4);
+				boolean found = readByte() == c1;
+				found &= readByte() == c2;
+				found &= readByte() == c3;
+				found &= readByte() == c4;
+				int chunkLength = readByte() | readByte() << 8 | readByte() << 16 | readByte() << 24;
 				if (found)
 					return chunkLength;
+				if (chunkLength < 0)
+					throw new IOException("Invalid chunk length before: " + c1 + c2 + c3 + c4);
 				skipFully(chunkLength);
+				skipPad(chunkLength);
 			}
+		}
+
+		/**
+		 * RIFF chunks are word aligned, so an odd-sized chunk is followed by a zero pad byte.
+		 * Some writers omit it; a chunk ID never starts with 0, so only a zero byte is consumed.
+		 */
+		private void skipPad(int chunkLength) throws IOException {
+			if ((chunkLength & 1) == 0 || !in.markSupported())
+				return;
+			in.mark(1);
+			if (in.read() != 0)
+				in.reset();
 		}
 
 		private void skipFully(int count) throws IOException {

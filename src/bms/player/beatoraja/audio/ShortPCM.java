@@ -129,12 +129,9 @@ public class ShortPCM extends PCM<short[]> {
 	 * @return トリミングしたPCM
 	 */
 	public ShortPCM slice(long starttime, long duration) {
-		if (duration == 0 || starttime + duration > ((long) this.len) * 1000000 / (sampleRate * channels)) {
-			duration = Math.max(((long) this.len) * 1000000 / (sampleRate * channels) - starttime, 0);
-		}
-
-		final int start = (int) ((starttime * sampleRate / 1000000) * channels);
-		int length = (int) ((duration * sampleRate / 1000000) * channels);
+		final int[] range = sliceRange(starttime, duration);
+		final int start = range[0];
+		int length = range[1];
 //		final int orglength = length;
 		while(length > channels) {
 			boolean zero = true;
