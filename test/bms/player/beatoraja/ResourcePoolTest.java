@@ -1,5 +1,10 @@
 package bms.player.beatoraja;
 
+import java.awt.image.BufferedImage;
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
@@ -7,6 +12,14 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
+
+import javax.imageio.ImageIO;
+
+import com.badlogic.gdx.Files;
+import com.badlogic.gdx.Gdx;
+import com.badlogic.gdx.backends.lwjgl3.Lwjgl3Files;
+import com.badlogic.gdx.graphics.Pixmap;
+import com.badlogic.gdx.utils.GdxNativesLoader;
 
 /** Regression tests for concurrent resource loading and eviction. */
 public final class ResourcePoolTest {
@@ -17,7 +30,98 @@ public final class ResourcePoolTest {
         assertEvictionWaitsForLoad(true);
         assertGenerationsAndRetry();
         assertResourceFactory();
+        assertImageSignatures();
+        assertPixmapLoading();
         System.out.println("ResourcePoolTest passed");
+    }
+
+    private static void assertImageSignatures() throws Exception {
+        byte[] jpeg = { (byte) 0xff, (byte) 0xd8, (byte) 0xff, (byte) 0xe0 };
+        byte[] webp = "RIFF\0\0\0\0WEBPVP8 ".getBytes(StandardCharsets.ISO_8859_1);
+        byte[] wave = "RIFF\0\0\0\0WAVEfmt ".getBytes(StandardCharsets.ISO_8859_1);
+        byte[] tga = { 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+        byte[] os2Bmp = "BA\0\0\0\0\0\0\0\0\0\0".getBytes(StandardCharsets.ISO_8859_1);
+        check(PixmapResourcePool.isJpegSignature(jpeg), "JPEG magic must be detected");
+        check(!PixmapResourcePool.isJpegSignature(new byte[] { (byte) 0xff, (byte) 0xd8 }), "Short header is not JPEG");
+        check(PixmapResourcePool.isWebpSignature(webp), "RIFF/WEBP magic must be detected");
+        check(!PixmapResourcePool.isWebpSignature(wave), "RIFF/WAVE is not WebP");
+        for (byte[] kept : new byte[][] { tga, os2Bmp }) {
+            check(!PixmapResourcePool.isJpegSignature(kept) && !PixmapResourcePool.isWebpSignature(kept),
+                    "Headerless TGA and OS/2 BMP must keep the native decoder");
+        }
+        check(PixmapResourcePool.readLimited(new ByteArrayInputStream(new byte[10]), 10).length == 10,
+                "Image at the byte limit must load");
+        try {
+            PixmapResourcePool.readLimited(new ByteArrayInputStream(new byte[11]), 10);
+            throw new AssertionError("Image over the byte limit must be rejected");
+        } catch (IOException expected) {
+        }
+        check(PixmapResourcePool.maxSpriteFrames(256, 256, 4096) == 256, "256px frames fit 16x16 per texture");
+        check(PixmapResourcePool.maxSpriteFrames(8192, 8192, 4096) == 1, "Oversized frame still yields one frame");
+    }
+
+    private static void assertPixmapLoading() throws Exception {
+        GdxNativesLoader.load();
+        Files oldFiles = Gdx.files;
+        Gdx.files = new Lwjgl3Files();
+        Path directory = java.nio.file.Files.createTempDirectory("d3-pixmap");
+        try {
+            // A JPEG renamed to .bmp must be decoded through ImageIO, not the native decoder.
+            BufferedImage image = new BufferedImage(3, 2, BufferedImage.TYPE_INT_RGB);
+            Path fakeBmp = directory.resolve("fake.bmp");
+            check(ImageIO.write(image, "jpg", fakeBmp.toFile()), "JPEG writer must exist");
+            Pixmap jpeg = PixmapResourcePool.loadPicture(fakeBmp.toString());
+            check(jpeg != null && jpeg.getWidth() == 3 && jpeg.getHeight() == 2, "JPEG disguised as .bmp must load");
+            jpeg.dispose();
+
+            // Truevision TGA v1 has no magic bytes: 2x1, 24-bit, top-left origin, BGR pixels.
+            byte[] tga = { 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 1, 0, 24, 0x20,
+                    (byte) 0xff, 0, 0, 0, 0, (byte) 0xff };
+            Path tgaFile = directory.resolve("plain.tga");
+            java.nio.file.Files.write(tgaFile, tga);
+            Pixmap pixmap = PixmapResourcePool.loadPicture(tgaFile.toString());
+            check(pixmap != null && pixmap.getWidth() == 2 && pixmap.getHeight() == 1, "Headerless TGA must load");
+            check(pixmap.getPixel(0, 0) == 0x0000ffff && pixmap.getPixel(1, 0) == 0xff0000ff,
+                    "Headerless TGA pixels must be preserved");
+            pixmap.dispose();
+
+            assertConvertKeepsSpriteSheet();
+        } finally {
+            Gdx.files = oldFiles;
+            try (var paths = java.nio.file.Files.walk(directory)) {
+                paths.sorted(java.util.Comparator.reverseOrder()).forEach(path -> path.toFile().delete());
+            }
+        }
+    }
+
+    private static void assertConvertKeepsSpriteSheet() {
+        var copying = new PixmapResourcePool() {
+            @Override
+            protected Pixmap convert(Pixmap pixmap) {
+                Pixmap copy = new Pixmap(pixmap.getWidth(), pixmap.getHeight(), pixmap.getFormat());
+                copy.drawPixmap(pixmap, 0, 0);
+                pixmap.dispose();
+                return copy;
+            }
+        };
+        var resource = copying.convert(new PixmapResourcePool.PixmapResource(
+                new Pixmap(8, 4, Pixmap.Format.RGBA8888), 2, 4, 4, 2, 1));
+        check(resource.getFrameCount() == 2 && resource.getColumns() == 2 && resource.getFrameWidth() == 4,
+                "Same-size conversion must keep sprite-sheet metadata");
+        resource.dispose();
+
+        var resizing = new PixmapResourcePool() {
+            @Override
+            protected Pixmap convert(Pixmap pixmap) {
+                pixmap.dispose();
+                return new Pixmap(16, 16, Pixmap.Format.RGBA8888);
+            }
+        };
+        resource = resizing.convert(new PixmapResourcePool.PixmapResource(
+                new Pixmap(8, 4, Pixmap.Format.RGBA8888), 2, 4, 4, 2, 1));
+        check(resource.getFrameCount() == 1 && resource.getFrameWidth() == 16,
+                "Resized conversion must fall back to a single frame");
+        resource.dispose();
     }
 
     private static void assertResourceFactory() {
