@@ -179,25 +179,58 @@ public interface AudioDriver extends Disposable {
 		final String[] exts = { ".wav", ".flac", ".ogg", ".mp3"};
 
 		List<Path> result = new ArrayList<Path>();
-		final int index = path.lastIndexOf('.');
-		final String name = path.substring(0, index < 0 ? path.length() : index);
-		final String ext = index < 0 ? "" : path.substring(index, path.length());
-		
 		Path p = Paths.get(path);
-		if (Files.exists(p)) {
+		if (Files.isRegularFile(p)) {
 			result.add(p);
 		}
+		final Path fileName = p.getFileName();
+		if (fileName == null) {
+			return result.toArray(new Path[result.size()]);
+		}
+		// Split the file name only, so dots in directory names are not mistaken for an extension.
+		final String file = fileName.toString();
+		final int index = file.lastIndexOf('.');
+		final String name = index < 0 ? file : file.substring(0, index);
+		final String ext = index < 0 ? "" : file.substring(index);
 
 		for (String _ext : exts) {
-			if (!_ext.equals(ext)) {
-				final Path p2 = p.resolve(name + _ext);
-				if(Files.exists(p2)) {
-					result.add(p2);					
+			if (!_ext.equalsIgnoreCase(ext)) {
+				// Same directory as the requested file. resolve() nested relative paths under the file itself.
+				final Path p2 = p.resolveSibling(name + _ext);
+				if(Files.isRegularFile(p2)) {
+					result.add(p2);
 				}
 			}
 		}
-		
+		if (result.isEmpty()) {
+			// Charts made on case-insensitive file systems often differ in case only.
+			Path parent = p.getParent() != null ? p.getParent() : Paths.get("");
+			try (var children = Files.list(parent)) {
+				List<Path> files = children.filter(Files::isRegularFile).toList();
+				for (String candidate : candidateNames(name, ext, exts)) {
+					for (Path child : files) {
+						if (child.getFileName().toString().equalsIgnoreCase(candidate)) {
+							result.add(child);
+						}
+					}
+				}
+			} catch (Exception ignored) {
+			}
+		}
+
 		return result.toArray(new Path[result.size()]);
+	}
+
+	/** File names tried in order: the requested extension, then the other audio extensions. */
+	private static List<String> candidateNames(String name, String ext, String[] exts) {
+		List<String> names = new ArrayList<>();
+		names.add(name + ext);
+		for (String candidate : exts) {
+			if (!candidate.equalsIgnoreCase(ext)) {
+				names.add(name + candidate);
+			}
+		}
+		return names;
 	}
 
 	/**
@@ -222,6 +255,17 @@ public interface AudioDriver extends Disposable {
 				SongResource candidate = resource.parent().resolve(name + candidateExtension);
 				if (candidate.exists()) {
 					result.add(candidate);
+				}
+			}
+			if (result.isEmpty()) {
+				// Archive entries and case-sensitive file systems keep the chart author's case.
+				List<SongResource> children = resource.parent().list();
+				for (String candidate : candidateNames(name, extension, extensions)) {
+					for (SongResource child : children) {
+						if (child.name().equalsIgnoreCase(candidate) && !child.isDirectory()) {
+							result.add(child);
+						}
+					}
 				}
 			}
 		} catch (Exception ignored) {
