@@ -34,7 +34,7 @@ public final class AudioContainerBoundaryTest {
         System.out.println("AudioContainerBoundaryTest passed");
     }
 
-    private static void siblingPaths() throws IOException {
+    private static void siblingPaths() throws Exception {
         Path root = Files.createTempDirectory(Files.createDirectories(Path.of("build-gradle", "tmp")), "d3-audio");
         check(!root.isAbsolute(), "Sibling lookup must be exercised with a relative path");
         try {
@@ -56,6 +56,12 @@ public final class AudioContainerBoundaryTest {
 
             check(AudioDriver.getPaths(songs.resolve("missing.wav").toString()).length == 0,
                     "Missing sounds must yield no paths");
+
+            // The cached listing is refreshed when the directory changes.
+            check(DirectoryListings.files(songs, "late.ogg").isEmpty(), "Not yet created");
+            Thread.sleep(20);
+            Files.write(songs.resolve("LATE.OGG"), new byte[] { 1 });
+            check(DirectoryListings.files(songs, "late.ogg").size() == 1, "A new file must refresh the cached listing");
         } finally {
             try (Stream<Path> files = Files.walk(root)) {
                 files.sorted(Comparator.reverseOrder()).forEach(path -> path.toFile().delete());
@@ -71,6 +77,8 @@ public final class AudioContainerBoundaryTest {
                 "Case-only mismatch must be found: " + Arrays.toString(Arrays.stream(found).map(SongResource::name).toArray()));
         found = AudioDriver.getResources(directory.resolve("snare.wav"));
         check(found.length == 1 && found[0].name().equals("snare.wav"), "Missing resource falls back to the request");
+        AudioDriver.getResources(directory.resolve("hat.wav"));
+        check(directory.lists == 1, "Unresolved sounds in one directory must list it once, listed " + directory.lists);
     }
 
     private static void signatures() {
@@ -188,6 +196,7 @@ public final class AudioContainerBoundaryTest {
     /** Case-sensitive in-memory directory, like an archive. */
     private static final class MemoryDirectory implements SongResource {
         private final Map<String, byte[]> files;
+        int lists;
 
         MemoryDirectory(Map<String, byte[]> files) {
             this.files = files;
@@ -197,12 +206,14 @@ public final class AudioContainerBoundaryTest {
         @Override public SongResource resolve(String relativePath) { return new MemoryFile(this, relativePath); }
         @Override public String name() { return ""; }
         @Override public String displayPath() { return "memory:/"; }
-        @Override public String cacheKey() { return displayPath(); }
+        // Unique like a real archive path, so separate directories never share a cached listing.
+        @Override public String cacheKey() { return "memory:" + System.identityHashCode(this) + "/"; }
         @Override public boolean exists() { return true; }
         @Override public boolean isDirectory() { return true; }
         @Override public long size() { return 0; }
         @Override public InputStream openStream() throws IOException { throw new IOException("directory"); }
         @Override public List<SongResource> list() {
+            lists++;
             List<SongResource> children = new ArrayList<>();
             files.keySet().forEach(name -> children.add(new MemoryFile(this, name)));
             return children;
