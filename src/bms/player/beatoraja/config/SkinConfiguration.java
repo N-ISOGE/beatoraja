@@ -21,7 +21,6 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.logging.Logger;
-import java.util.stream.Stream;
 
 /**
  * スキンコンフィグ
@@ -312,57 +311,36 @@ public class SkinConfiguration extends MainState {
 
 	private void updateCustomFiles() {
 		for (SkinHeader.CustomFile file : selectedSkinHeader.getCustomFiles()) {
-			String name = file.path.substring(file.path.lastIndexOf('/') + 1);
-			if(file.path.contains("|")) {
-				if(file.path.length() > file.path.lastIndexOf('|') + 1) {
-					name = file.path.substring(file.path.lastIndexOf('/') + 1, file.path.indexOf('|')) + file.path.substring(file.path.lastIndexOf('|') + 1);
-				} else {
-					name = file.path.substring(file.path.lastIndexOf('/') + 1, file.path.indexOf('|'));
+			List<String> items = new ArrayList<>(SkinCustomization.fileChoices(file));
+			items.add("Random");
+			String selection = null;
+			for(SkinConfig.FilePath f : config.getProperties().getFile()) {
+				if(f.name.equals(file.name)) {
+					selection = f.path;
+					break;
 				}
 			}
-			final Path dirpath = Paths.get(file.path.substring(0, file.path.lastIndexOf('/')));
-			if (!Files.exists(dirpath)) {
-				continue;
-			}
-			try (DirectoryStream<Path> paths = Files.newDirectoryStream(dirpath,
-					"{" + name.toLowerCase() + "," + name.toUpperCase() + "}")) {
-
-				List<String> items = new ArrayList<>();
-				for (Path path : paths) {
-					items.add(path.getFileName().toString());
-				}
-				items.add("Random");
-				String selection = null;
-				for(SkinConfig.FilePath f : config.getProperties().getFile()) {
-					if(f.name.equals(file.name)) {
-						selection = f.path;
+			if (selection == null && file.def != null) {
+				// デフォルト値のファイル名またはそれに拡張子を付けたものが存在すれば使用する
+				for (String item : items) {
+					if (item.equalsIgnoreCase(file.def)) {
+						selection = item;
+						break;
+					}
+					int point = item.lastIndexOf('.');
+					if (point != -1 && item.substring(0, point).equalsIgnoreCase(file.def)) {
+						selection = item;
 						break;
 					}
 				}
-				if (selection == null && file.def != null) {
-					// デフォルト値のファイル名またはそれに拡張子を付けたものが存在すれば使用する
-					for (String item : items) {
-						if (item.equalsIgnoreCase(file.def)) {
-							selection = item;
-							break;
-						}
-						int point = item.lastIndexOf('.');
-						if (point != -1 && item.substring(0, point).equalsIgnoreCase(file.def)) {
-							selection = item;
-							break;
-						}
-					}
-					setFilePath(file.name, selection);
-				}
-				if (selection == null) {
-					selection = items.get(0);
-					setFilePath(file.name, selection);
-				}
-				CustomFileItem item = new CustomFileItem(file.name, items, selection);
-				customOptions.add(item);
-			} catch (IOException e) {
-				e.printStackTrace();
+				setFilePath(file.name, selection);
 			}
+			if (selection == null) {
+				selection = items.get(0);
+				setFilePath(file.name, selection);
+			}
+			CustomFileItem item = new CustomFileItem(file.name, items, selection);
+			customOptions.add(item);
 		}
 	}
 
@@ -478,11 +456,13 @@ public class SkinConfiguration extends MainState {
 		previewConfig.validate();
 		Skin preview = null;
 		try {
-			preview = SkinLoader.load(this, type, previewConfig);
+			preview = SkinLoader.loadConfigurationPreview(this, type, previewConfig,
+					main.getConfig().isRestrictSkinPreviewEffects());
 			if (preview != null) {
 				preview.prepare(this);
 			}
 		} catch (Throwable e) {
+			if (preview != null) preview.dispose();
 			preview = null;
 		}
 		setSelectedSkin(preview);
@@ -503,8 +483,7 @@ public class SkinConfiguration extends MainState {
 
 	private void loadAllSkins() {
 		allSkins = new ArrayList<SkinHeader>();
-		List<Path> skinPaths = new ArrayList<>();
-		scanSkins(Paths.get("skin"), skinPaths);
+		List<Path> skinPaths = SkinCatalog.scanSkinFiles(Paths.get(main.getConfig().getSkinpath()));
 		for (Path path : skinPaths) {
 			String pathString = path.toString().toLowerCase();
 			if (pathString.endsWith(".json")) {
@@ -514,8 +493,7 @@ public class SkinConfiguration extends MainState {
 					allSkins.add(header);
 				}
 			} else if (pathString.endsWith(".luaskin")) {
-				LuaSkinLoader loader = LuaSkinLoader.sandboxed(path);
-				SkinHeader header = loader.loadHeader(path);
+				SkinHeader header = LuaSkinLoader.loadSandboxedHeader(path);
 				if (header != null) {
 					allSkins.add(header);
 				}
@@ -542,24 +520,6 @@ public class SkinConfiguration extends MainState {
 					e.printStackTrace();
 				}
 			}
-		}
-	}
-
-	private void scanSkins(Path path, List<Path> paths) {
-		if (Files.isSymbolicLink(path)) {
-			return;
-		}
-		if (Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)) {
-			try (Stream<Path> sub = Files.list(path)) {
-				sub.forEach((Path t) -> {
-					scanSkins(t, paths);
-				});
-			} catch (IOException e) {
-			}
-		} else if (path.getFileName().toString().toLowerCase().endsWith(".lr2skin")
-				|| path.getFileName().toString().toLowerCase().endsWith(".luaskin")
-				|| path.getFileName().toString().toLowerCase().endsWith(".json")) {
-			paths.add(path);
 		}
 	}
 
