@@ -5,11 +5,11 @@ import static bms.player.beatoraja.SystemSoundManager.SoundType.*;
 import java.util.Arrays;
 import java.util.List;
 import java.util.function.Consumer;
-import java.util.logging.Logger;
 import java.util.stream.Collectors;
 
 import bms.player.beatoraja.select.bar.*;
 import bms.player.beatoraja.song.SongData;
+import bms.tool.mdprocessor.MusicDownloadProcessor;
 
 import bms.player.beatoraja.external.DesktopActions;
 
@@ -84,36 +84,21 @@ public enum MusicSelectCommand {
 		}
 	}),
 	DOWNLOAD_IPFS(selector -> {
+		MusicDownloadProcessor processor = selector.main.getMusicDownloadProcessor();
+		if (processor == null || !(selector.getBarManager().getSelected() instanceof SongBar songBar)) {
+			return;
+		}
 		Queue<DirectoryBar> dir = selector.getBarManager().getDirectory();
-		String[] acceptdomain = { "lnt.softether.net", "www.ribbit.xyz", "rattoto10.jounin.jp",
-				"flowermaster.web.fc2.com", "stellawingroad.web.fc2.com", "pmsdifficulty.xxxxxxxx.jp", "walkure.net",
-				"stellabms.xyz", "dpbmsdelta.web.fc2.com", "cgi.geocities.jp/asahi3jpn", "nekokan.dyndns.info" };
-		boolean startdownload = false;
-		for (DirectoryBar d : dir) {
-			if (d instanceof TableBar) {
-				String selecturl = ((TableBar) d).getUrl();
-				if (selecturl == null)
-					break;
-				for (String url : acceptdomain) {
-					if (selecturl.startsWith("http://" + url) || selecturl.startsWith("https://" + url)) {
-						Bar current = selector.getBarManager().getSelected();
-						if (current instanceof SongBar) {
-							final SongData song = ((SongBar) current).getSongData();
-							if (song != null && song.getIpfs() != null) {
-								selector.main.getMusicDownloadProcessor().start(song);
-								startdownload = true;
-							}
-						}
-						break;
-					}
-				}
-				if (!startdownload) {
-					Logger.getGlobal().info("ダウンロードは開始されませんでした。");
+		for (int i = dir.size - 1; i >= 0; i--) {
+			if (dir.get(i) instanceof TableBar table) {
+				if (MusicDownloadProcessor.isAllowedTable(table.getUrl())) {
+					processor.start(songBar.getSongData());
+					return;
 				}
 				break;
 			}
-
 		}
+		selector.main.getMessageRenderer().addMessage("IPFS download is unavailable for this table", 5000, Color.ORANGE, 1);
 	}),
 	/**
 	 * 同一フォルダにある譜面を全て表示する．コースの場合は構成譜面を全て表示する
