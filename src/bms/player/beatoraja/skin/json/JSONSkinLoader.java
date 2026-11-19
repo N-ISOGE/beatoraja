@@ -1,5 +1,6 @@
 package bms.player.beatoraja.skin.json;
 
+import bms.player.beatoraja.skin.SkinTextReader;
 import static bms.player.beatoraja.Resolution.*;
 
 import java.io.*;
@@ -100,7 +101,7 @@ public class JSONSkinLoader extends SkinLoader {
 			Json json = new Json();
 			json.setIgnoreUnknownFields(true);
 			serializer.setSerializers(json, null, p);
-			try (Reader reader = new FileReader(p.toFile())) {
+			try (Reader reader = SkinTextReader.open(p)) {
 				sk = json.fromJson(JsonSkin.Skin.class, reader);
 			}
 			if (sk == null) {
@@ -240,7 +241,9 @@ public class JSONSkinLoader extends SkinLoader {
 				return getPath(p.getParent().toString() + "/" + path, filemap).getPath();
 			});
 
-			sk = json.fromJson(JsonSkin.Skin.class, new FileReader(p.toFile()));
+			try (Reader reader = SkinTextReader.open(p)) {
+				sk = json.fromJson(JsonSkin.Skin.class, reader);
+			}
 			skin = loadJsonSkin(header, sk, type, property, p);
 		} catch (FileNotFoundException e) {
 			Logger.getGlobal().severe("JSONスキンファイルが見つかりません : " + p.toString());
@@ -396,6 +399,12 @@ public class JSONSkinLoader extends SkinLoader {
 		return skin;
 	}
 
+	Path resolveFontPath(Path skinPath, String fontPath) {
+		Path path = skinPath.getParent().resolve(fontPath);
+		requirePreviewPath(path);
+		return path;
+	}
+
 	SkinFontSource getFontSource(String fontPath, String[] fallbackFontPaths) {
 		var key = createFontSourceKey(fontPath, fallbackFontPaths);
 		return fontSourceMap.computeIfAbsent(key, ignored -> {
@@ -509,7 +518,7 @@ public class JSONSkinLoader extends SkinLoader {
 		if (imagefile.exists()) {
 			boolean isMovie = false;
 			 for (String mov : VideoFormat.getAllExtensions()) {
-				 if (imagefile.getName().toLowerCase().endsWith(mov)) {
+				 if (imagefile.getName().toLowerCase(java.util.Locale.ROOT).endsWith("." + mov)) {
 					 try {
 					 	SkinSourceMovie mm = new SkinSourceMovie(imagefile.getAbsolutePath());
 					 	data.data = mm;

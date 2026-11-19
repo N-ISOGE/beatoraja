@@ -883,6 +883,7 @@ public final class SkinTextBitmap extends SkinText {
 		public static final int TYPE_DISTANCE_FIELD = 1;
 		public static final int TYPE_COLORED_DISTANCE_FIELD = 2;
 
+		private final Path previewRoot = SkinLoader.previewSkinRoot();
 		private boolean usecim;
 		private boolean useMipMaps;
 		private Path fontPath;
@@ -928,7 +929,7 @@ public final class SkinTextBitmap extends SkinText {
 		}
 
 		public SkinTextBitmapSource(Path fontPath, FallbackFont[] fallbackFonts, boolean usecim, boolean useMipMaps) {
-			this.usecim = usecim;
+			this.usecim = usecim && previewRoot == null;
 			this.useMipMaps = useMipMaps;
 			this.fontPath = fontPath;
 			this.fallbackFonts = fallbackFonts != null ? fallbackFonts : new FallbackFont[0];
@@ -946,7 +947,7 @@ public final class SkinTextBitmap extends SkinText {
 		}
 
 		public CacheableBitmapFont createCacheableFont(Path fontPath, int type) {
-			return BitmapFontLoader.load(fontPath, type, usecim, useMipMaps);
+			return BitmapFontLoader.load(fontPath, type, usecim, useMipMaps, previewRoot);
 		}
 
 		/**

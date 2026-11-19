@@ -13,6 +13,7 @@ import org.luaj.vm2.LuaTable;
 public class MainStateAccessor implements com.badlogic.gdx.utils.Disposable {
 
 	private final List<LuaApiExporter> exporters;
+	private final boolean allowExternalEffects;
 
 	public MainStateAccessor(MainState state) {
 		this(state, () -> null);
@@ -24,18 +25,26 @@ public class MainStateAccessor implements com.badlogic.gdx.utils.Disposable {
 
 	MainStateAccessor(MainState state, Supplier<Path> skinDirectorySupplier, boolean allowExternalEffects) {
 		SkinLuaPathResolver pathResolver = new SkinLuaPathResolver(skinDirectorySupplier);
-		exporters = List.of(
-				new MainStatePropertyLuaApiExporter(state),
-				new SkinFileLuaApiExporter(pathResolver, allowExternalEffects),
-				new SkinRuntimeLuaApiExporter(allowExternalEffects),
-				new SkinHttpLuaApiExporter(),
-				new SkinAudioLuaApiExporter(state, pathResolver)
-		);
+		var apis = new java.util.ArrayList<LuaApiExporter>();
+		apis.add(new MainStatePropertyLuaApiExporter(state));
+		apis.add(new SkinFileLuaApiExporter(pathResolver, allowExternalEffects));
+		apis.add(new SkinRuntimeLuaApiExporter(allowExternalEffects));
+		if (allowExternalEffects) {
+			apis.add(new SkinHttpLuaApiExporter());
+			apis.add(new SkinAudioLuaApiExporter(state, pathResolver));
+		}
+		exporters = List.copyOf(apis);
+		this.allowExternalEffects = allowExternalEffects;
 	}
 
 	public void export(LuaTable table) {
 		for(LuaApiExporter exporter : exporters) {
 			exporter.export(table);
+		}
+		if (!allowExternalEffects) {
+			for (String name : List.of("set_timer", "event_exec", "set_volume_sys", "set_volume_key", "set_volume_bg")) {
+				table.set(name, LuaTable.NIL);
+			}
 		}
 	}
 
