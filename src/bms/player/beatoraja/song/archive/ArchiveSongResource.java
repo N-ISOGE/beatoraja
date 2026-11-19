@@ -108,13 +108,15 @@ final class ArchiveSongResource implements SongResource {
 			throw new IOException("Cannot list an archive file: " + displayPath());
 		}
 		String prefix = entryName.isEmpty() ? "" : entryName + "/";
+		String keyPrefix = SongArchive.entryKey(prefix);
+		int depth = prefix.isEmpty() ? 0 : entryName.split("/").length;
 		List<SongResource> children = new ArrayList<>();
 		Set<String> childNames = new HashSet<>();
 		for (String candidate : SongArchives.listEntries(archive)) {
-			if (!candidate.startsWith(prefix)) {
+			if (!SongArchive.entryKey(candidate).startsWith(keyPrefix)) {
 				continue;
 			}
-			String remainder = candidate.substring(prefix.length());
+			String remainder = depth == 0 ? candidate : candidate.split("/", depth + 1)[depth];
 			if (remainder.isEmpty()) {
 				continue;
 			}

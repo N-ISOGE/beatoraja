@@ -5,20 +5,31 @@ import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
+import java.nio.file.StandardOpenOption;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipException;
-import java.util.zip.ZipFile;
+import java.util.logging.Logger;
+import java.util.zip.CRC32;
 
-/** ZIP implementation, including CP932 fallback for legacy Japanese archives. */
+import org.apache.commons.compress.archivers.zip.UnicodePathExtraField;
+import org.apache.commons.compress.archivers.zip.UnixStat;
+import org.apache.commons.compress.archivers.zip.ZipArchiveEntry;
+import org.apache.commons.compress.archivers.zip.ZipFile;
+
+/** ZIP reader with one entry-name policy for scanning, streaming and extraction. */
 public final class ZipSongArchive extends SongArchive {
-
-	private static final String LEGACY_ZIP_ENCODING = "MS932";
+	private static final Logger LOG = Logger.getLogger(ZipSongArchive.class.getName());
+	private static final Charset MS932 = Charset.forName("MS932");
+	private static final Charset MS949 = Charset.forName("MS949");
 
 	public ZipSongArchive() {
 		super(".zip");
@@ -26,252 +37,187 @@ public final class ZipSongArchive extends SongArchive {
 
 	@Override
 	public List<String> listEntries(Path archive) throws IOException {
-		try {
-			return listEntriesWithDefaultEncoding(archive);
-		} catch (ZipException e) {
-			return listEntriesWithLegacyEncoding(archive);
+		try (Archive zip = new Archive(archive)) {
+			return zip.entries.values().stream().map(Item::name).toList();
 		}
 	}
 
 	@Override
 	public long entrySize(Path archive, String entryName) throws IOException {
-		try {
-			return entrySizeWithDefaultEncoding(archive, entryName);
-		} catch (ZipException e) {
-			return entrySizeWithLegacyEncoding(archive, entryName);
+		try (Archive zip = new Archive(archive)) {
+			return zip.find(entryName).entry().getSize();
 		}
 	}
 
 	@Override
 	public InputStream openEntry(Path archive, String entryName) throws IOException {
+		Archive zip = new Archive(archive);
 		try {
-			return openEntryWithDefaultEncoding(archive, entryName);
-		} catch (ZipException e) {
-			return openEntryWithLegacyEncoding(archive, entryName);
-		}
-	}
-
-	private long entrySizeWithDefaultEncoding(Path archive, String entryName) throws IOException {
-		try (ZipFile zip = new ZipFile(archive.toFile())) {
-			ZipEntry entry = zip.getEntry(entryName);
-			if (entry == null || entry.isDirectory()) {
-				throw new IOException("ZIP entry does not exist: " + entryName);
+			Item item = zip.find(entryName);
+			long limit = entryLimit(item.name());
+			if (item.entry().getSize() > limit) {
+				throw new IOException("ZIP entry exceeds the size limit: " + item.name());
 			}
-			return entry.getSize();
-		}
-	}
-
-	private long entrySizeWithLegacyEncoding(Path archive, String entryName) throws IOException {
-		try (var zip = new org.apache.commons.compress.archivers.zip.ZipFile(archive.toFile(), LEGACY_ZIP_ENCODING)) {
-			var entry = zip.getEntry(entryName);
-			if (entry == null || entry.isDirectory()) {
-				throw new IOException("ZIP entry does not exist: " + entryName);
-			}
-			return entry.getSize();
+			return new FilterInputStream(limitedEntry(zip.file.getInputStream(item.entry()), limit, item.name())) {
+				@Override
+				public void close() throws IOException {
+					try (zip) {
+						super.close();
+					}
+				}
+			};
+		} catch (IOException | RuntimeException e) {
+			closeOnFailure(zip, e);
+			throw e;
 		}
 	}
 
 	@Override
 	public byte[] readEntry(Path archive, String entryName) throws IOException {
-		try {
-			return readEntryWithDefaultEncoding(archive, entryName);
-		} catch (ZipException e) {
-			return readEntryWithLegacyEncoding(archive, entryName);
-		}
-	}
-
-	private InputStream openEntryWithDefaultEncoding(Path archive, String entryName) throws IOException {
-		ZipFile zip = new ZipFile(archive.toFile());
-		try {
-			ZipEntry entry = zip.getEntry(entryName);
-			if (entry == null || entry.isDirectory()) {
-				throw new IOException("ZIP entry does not exist: " + entryName);
-			}
-			return closeArchiveWithStream(zip.getInputStream(entry), zip);
-		} catch (IOException | RuntimeException e) {
-			zip.close();
-			throw e;
-		}
-	}
-
-	private InputStream openEntryWithLegacyEncoding(Path archive, String entryName) throws IOException {
-		var zip = new org.apache.commons.compress.archivers.zip.ZipFile(archive.toFile(), LEGACY_ZIP_ENCODING);
-		try {
-			var entry = zip.getEntry(entryName);
-			if (entry == null || entry.isDirectory()) {
-				throw new IOException("ZIP entry does not exist: " + entryName);
-			}
-			return closeArchiveWithStream(zip.getInputStream(entry), zip);
-		} catch (IOException | RuntimeException e) {
-			zip.close();
-			throw e;
-		}
-	}
-
-	private InputStream closeArchiveWithStream(InputStream stream, AutoCloseable archive) {
-		return new FilterInputStream(stream) {
-			@Override
-			public void close() throws IOException {
-				try {
-					super.close();
-				} finally {
-					try {
-						archive.close();
-					} catch (Exception e) {
-						if (e instanceof IOException ioException) {
-							throw ioException;
-						}
-						throw new IOException(e);
-					}
-				}
-			}
-		};
-	}
-
-	@Override
-	public void extract(Path archive, Path root) throws IOException {
-		try {
-			extractWithDefaultEncoding(archive, root);
-		} catch (ZipException e) {
-			extractWithLegacyEncoding(archive, root);
-		}
-	}
-
-	private List<String> listEntriesWithDefaultEncoding(Path archive) throws IOException {
-		List<String> entries = new ArrayList<>();
-		try (ZipFile zip = new ZipFile(archive.toFile())) {
-			if (zip.size() > MAX_ENTRY_COUNT) {
-				throw new IOException("ZIP contains too many entries: " + archive);
-			}
-			Set<String> names = new HashSet<>();
-			var zipEntries = zip.entries();
-			while (zipEntries.hasMoreElements()) {
-				ZipEntry entry = zipEntries.nextElement();
-				if (entry.isDirectory()) {
-					continue;
-				}
-				addEntry(entries, names, entry.getName());
-			}
-		}
-		return entries;
-	}
-
-	private List<String> listEntriesWithLegacyEncoding(Path archive) throws IOException {
-		List<String> entries = new ArrayList<>();
-		try (var zip = new org.apache.commons.compress.archivers.zip.ZipFile(archive.toFile(), LEGACY_ZIP_ENCODING)) {
-			Set<String> names = new HashSet<>();
-			var zipEntries = zip.getEntries();
-			int entryCount = 0;
-			while (zipEntries.hasMoreElements()) {
-				if (++entryCount > MAX_ENTRY_COUNT) {
-					throw new IOException("ZIP contains too many entries: " + archive);
-				}
-				var entry = zipEntries.nextElement();
-				if (entry.isDirectory()) {
-					continue;
-				}
-				addEntry(entries, names, entry.getName());
-			}
-		}
-		return entries;
-	}
-
-	private byte[] readEntryWithDefaultEncoding(Path archive, String entryName) throws IOException {
-		try (ZipFile zip = new ZipFile(archive.toFile())) {
-			ZipEntry entry = zip.getEntry(entryName);
-			if (entry == null || entry.isDirectory()) {
-				throw new IOException("ZIP entry does not exist: " + entryName);
-			}
-			return readEntry(zip.getInputStream(entry), entry.getSize(), entryName);
-		}
-	}
-
-	private byte[] readEntryWithLegacyEncoding(Path archive, String entryName) throws IOException {
-		try (var zip = new org.apache.commons.compress.archivers.zip.ZipFile(archive.toFile(), LEGACY_ZIP_ENCODING)) {
-			var entry = zip.getEntry(entryName);
-			if (entry == null || entry.isDirectory()) {
-				throw new IOException("ZIP entry does not exist: " + entryName);
-			}
-			return readEntry(zip.getInputStream(entry), entry.getSize(), entryName);
-		}
-	}
-
-	private byte[] readEntry(InputStream input, long entrySize, String entryName) throws IOException {
-		if (entrySize > MAX_CHART_SIZE) {
-			throw new IOException("ZIP chart is too large: " + entryName);
-		}
-		try (input; ByteArrayOutputStream output = new ByteArrayOutputStream((int) Math.max(entrySize, 0))) {
+		try (InputStream input = openEntry(archive, entryName); var output = new ByteArrayOutputStream()) {
 			return readLimited(input, output, MAX_CHART_SIZE, "ZIP chart is too large: " + entryName);
 		}
 	}
 
-	private void extractWithDefaultEncoding(Path archive, Path root) throws IOException {
-		long extractedSize = 0;
-		try (ZipFile zip = new ZipFile(archive.toFile())) {
-			if (zip.size() > MAX_ENTRY_COUNT) {
-				throw new IOException("ZIP contains too many entries: " + archive);
-			}
-			var entries = zip.entries();
-			Set<String> names = new HashSet<>();
-			byte[] buffer = new byte[8192];
-			while (entries.hasMoreElements()) {
-				ZipEntry entry = entries.nextElement();
-				if (entry.isDirectory()) {
-					continue;
+	@Override
+	public void extract(Path archive, Path root) throws IOException {
+		Files.createDirectories(root);
+		try (Archive zip = new Archive(archive)) {
+			long[] total = {0};
+			for (Item item : zip.entries.values()) {
+				Path target = extractionTarget(root, item.name(), "ZIP entry");
+				try (InputStream input = limitedEntry(zip.file.getInputStream(item.entry()), entryLimit(item.name()), item.name());
+						OutputStream output = new LimitedOutputStream(Files.newOutputStream(target, StandardOpenOption.CREATE_NEW),
+								total, MAX_EXTRACTED_SIZE, "ZIP is too large after extraction: " + archive)) {
+					input.transferTo(output);
 				}
-				String name = checkedEntryName(names, entry.getName());
-				extractedSize = extractEntry(zip.getInputStream(entry), root, name, buffer, extractedSize, archive);
 			}
 		}
 	}
 
-	private void extractWithLegacyEncoding(Path archive, Path root) throws IOException {
-		long extractedSize = 0;
-		try (var zip = new org.apache.commons.compress.archivers.zip.ZipFile(archive.toFile(), LEGACY_ZIP_ENCODING)) {
-			var entries = zip.getEntries();
-			Set<String> names = new HashSet<>();
-			byte[] buffer = new byte[8192];
-			int entryCount = 0;
-			while (entries.hasMoreElements()) {
-				if (++entryCount > MAX_ENTRY_COUNT) {
-					throw new IOException("ZIP contains too many entries: " + archive);
+	private static String readName(ZipArchiveEntry entry) throws IOException {
+		byte[] raw = entry.getRawName();
+		if (raw == null) {
+			throw new IOException("ZIP entry has no central-directory name");
+		}
+		String utf8 = decode(raw, StandardCharsets.UTF_8);
+		if (entry.getGeneralPurposeBit().usesUTF8ForNames()) {
+			if (utf8 == null) {
+				throw new IOException("Invalid ZIP UTF-8 entry name");
+			}
+			return utf8;
+		}
+		if (entry.getExtraField(UnicodePathExtraField.UPATH_ID) instanceof UnicodePathExtraField unicode) {
+			CRC32 crc = new CRC32();
+			crc.update(raw);
+			if (unicode.getNameCRC32() == crc.getValue()) {
+				String extra = decode(unicode.getUnicodeName(), StandardCharsets.UTF_8);
+				if (extra != null) {
+					return extra;
 				}
-				var entry = entries.nextElement();
-				if (entry.isDirectory()) {
-					continue;
-				}
-				String name = checkedEntryName(names, entry.getName());
-				extractedSize = extractEntry(zip.getInputStream(entry), root, name, buffer, extractedSize, archive);
 			}
 		}
-	}
-
-	private void addEntry(List<String> entries, Set<String> names, String entryName) throws IOException {
-		entries.add(checkedEntryName(names, entryName));
-	}
-
-	private String checkedEntryName(Set<String> names, String entryName) throws IOException {
-		String name = normalizeEntryNameOrNull(entryName);
-		if (name == null || !names.add(name)) {
-			throw new IOException("Unsafe ZIP entry: " + entryName);
+		if (utf8 != null) {
+			return utf8;
 		}
-		return name;
+		String japanese = decode(raw, MS932);
+		String korean = decode(raw, MS949);
+		if (korean != null && (japanese == null || (countHangul(korean) > 0
+				&& japanese.codePoints().noneMatch(ZipSongArchive::isJapaneseText)))) {
+			LOG.fine("Using MS949 for a legacy ZIP entry name");
+			return korean;
+		}
+		if (japanese != null) {
+			LOG.fine("Using MS932 for a legacy ZIP entry name");
+			return japanese;
+		}
+		throw new IOException("Unsupported ZIP entry name encoding");
 	}
 
-	private long extractEntry(InputStream input, Path root, String entryName, byte[] buffer, long extractedSize,
-			Path archive) throws IOException {
-		Path target = extractionTarget(root, entryName, "ZIP entry");
-		Files.createDirectories(target.getParent());
-		try (input; OutputStream output = Files.newOutputStream(target)) {
-			int read;
-			while ((read = input.read(buffer)) >= 0) {
-				extractedSize += read;
-				if (extractedSize > MAX_EXTRACTED_SIZE) {
-					throw new IOException("ZIP is too large after extraction: " + archive);
+	private static long countHangul(String text) {
+		return text.codePoints().filter(c -> c >= 0xAC00 && c <= 0xD7A3).count();
+	}
+
+	private static boolean isJapaneseText(int c) {
+		return (c >= 0x3041 && c <= 0x30FA) || (c >= 0x4E00 && c <= 0x9FFF);
+	}
+
+	private static String decode(byte[] bytes, Charset charset) {
+		try {
+			String text = charset.newDecoder().decode(ByteBuffer.wrap(bytes)).toString();
+			return text.indexOf('\uFFFD') < 0 ? text : null;
+		} catch (CharacterCodingException e) {
+			return null;
+		}
+	}
+
+	private static void closeOnFailure(Archive zip, Exception error) {
+		try {
+			zip.close();
+		} catch (IOException closeFailure) {
+			error.addSuppressed(closeFailure);
+		}
+	}
+
+	private record Item(String name, ZipArchiveEntry entry) {}
+
+	private static final class Archive implements AutoCloseable {
+		private final ZipFile file;
+		private final Map<String, Item> entries = new LinkedHashMap<>();
+
+		private Archive(Path path) throws IOException {
+			try {
+				file = ZipFile.builder().setPath(path).setCharset(Charset.forName("CP437")).setUseUnicodeExtraFields(false).get();
+			} catch (RuntimeException e) {
+				throw new IOException("Unable to open ZIP archive: " + path, e);
+			}
+			try {
+				int count = 0;
+				Set<String> names = new HashSet<>();
+				Set<String> directories = new HashSet<>();
+				var all = file.getEntries();
+				while (all.hasMoreElements()) {
+					if (++count > MAX_ENTRY_COUNT) {
+						throw new IOException("ZIP contains too many entries: " + path);
+					}
+					ZipArchiveEntry entry = all.nextElement();
+					int type = entry.getUnixMode() & UnixStat.FILE_TYPE_FLAG;
+					if (entry.isUnixSymlink() || (type != 0 && type != UnixStat.FILE_FLAG && type != UnixStat.DIR_FLAG)) {
+						throw new IOException("Unsupported ZIP entry type: " + path);
+					}
+					String name = readName(entry);
+					boolean directory = type == UnixStat.DIR_FLAG || entry.isDirectory() || name.endsWith("/");
+					if (directory && name.endsWith("/")) {
+						name = name.substring(0, name.length() - 1);
+					}
+					name = normalizeEntryNameOrNull(name);
+					if (name == null || (!directory && !file.canReadEntryData(entry))) {
+						throw new IOException("Invalid ZIP entry: " + entry.getName());
+					}
+					registerEntry(names, directories, name, directory);
+					if (!directory) {
+						entries.put(entryKey(name), new Item(name, entry));
+					}
 				}
-				output.write(buffer, 0, read);
+			} catch (IOException | RuntimeException e) {
+				closeOnFailure(this, e);
+				LOG.fine("Rejected ZIP archive: " + path + " (" + e.getMessage() + ")");
+				throw new IOException("Unable to read ZIP entries: " + path, e);
 			}
 		}
-		return extractedSize;
+
+		private Item find(String name) throws IOException {
+			String normalized = normalizeEntryNameOrNull(name);
+			Item item = normalized == null ? null : entries.get(entryKey(normalized));
+			if (item == null) {
+				throw new IOException("ZIP entry does not exist: " + name);
+			}
+			return item;
+		}
+
+		@Override
+		public void close() throws IOException {
+			file.close();
+		}
 	}
 }
