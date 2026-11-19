@@ -20,16 +20,22 @@ final class SkinHttpBody {
     }
 
     static byte[] read(HttpURLConnection connection, int maxBytes) throws IOException {
+        return read(connection, maxBytes, 0);
+    }
+
+    static byte[] read(HttpURLConnection connection, int maxBytes, long deadline) throws IOException {
         checkedLimit(maxBytes);
         if (connection.getContentLengthLong() > maxBytes) throw new IOException("HTTP response too large: limit=" + maxBytes);
         try (InputStream input = connection.getInputStream(); var output = new ByteArrayOutputStream()) {
             byte[] buffer = new byte[8192];
             int count;
             while ((count = input.read(buffer, 0, Math.min(buffer.length, maxBytes - output.size() + 1))) != -1) {
+                if (deadline != 0) SkinAsyncHttp.remainingMillis(deadline);
                 if (Thread.currentThread().isInterrupted()) throw new IOException("HTTP request cancelled");
                 if (output.size() + count > maxBytes) throw new IOException("HTTP response too large: limit=" + maxBytes);
                 output.write(buffer, 0, count);
             }
+            if (deadline != 0) SkinAsyncHttp.remainingMillis(deadline);
             return output.toByteArray();
         }
     }

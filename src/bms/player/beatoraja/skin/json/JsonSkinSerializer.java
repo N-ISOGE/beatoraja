@@ -1,5 +1,7 @@
 package bms.player.beatoraja.skin.json;
 
+import bms.player.beatoraja.skin.SkinTextReader;
+import bms.player.beatoraja.skin.SkinPathPolicy;
 import bms.player.beatoraja.skin.SkinLoader;
 import bms.player.beatoraja.skin.lua.SkinLuaAccessor;
 import bms.player.beatoraja.skin.property.*;
@@ -11,8 +13,7 @@ import com.badlogic.gdx.utils.reflect.Field;
 import com.badlogic.gdx.utils.reflect.ReflectionException;
 
 import java.io.File;
-import java.io.FileNotFoundException;
-import java.io.FileReader;
+import java.io.IOException;
 import java.lang.reflect.Array;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -24,7 +25,10 @@ import java.util.function.Function;
 public class JsonSkinSerializer {
 
 	private SkinLuaAccessor lua;
-	private Function<String, File> pathGetter;
+	private final Function<String, File> pathGetter;
+	private final HashSet<Path> includes = new HashSet<>();
+	private Path includeRoot;
+	private static final int MAX_INCLUDE_DEPTH = 16;
 
 	public JsonSkinSerializer(SkinLuaAccessor lua, Function<String, File> pathGetter) {
 		this.lua = lua;
@@ -32,6 +36,14 @@ public class JsonSkinSerializer {
 	}
 
 	public void setSerializers(Json json, HashSet<Integer> enabledOptions, Path path) {
+		Path entry = path.toAbsolutePath().normalize();
+		includeRoot = entry.getParent();
+		includes.clear();
+		includes.add(entry);
+		registerSerializers(json, enabledOptions, path);
+	}
+
+	private void registerSerializers(Json json, HashSet<Integer> enabledOptions, Path path) {
 		Class[] classes = {
 				JsonSkin.Property.class,
 				JsonSkin.Filepath.class,
@@ -212,6 +224,30 @@ public class JsonSkinSerializer {
 		}
 	}
 
+	private Object readInclude(Path parent, JsonValue value, Class<?> type, HashSet<Integer> options) {
+		try {
+			String name = value.get("include").asString();
+			Path reference = Path.of(name);
+			if (reference.isAbsolute()) return null;
+			Path directory = parent.getParent() == null ? Path.of(".") : parent.getParent();
+			Path relative = directory.resolve(reference);
+			Path childPath = pathGetter.apply(relative.toString().replace('\\', '/')).toPath();
+			Path path = SkinPathPolicy.requireInside(includeRoot, childPath);
+			if (includes.size() > MAX_INCLUDE_DEPTH || !includes.add(path)) return null;
+			try (var reader = SkinTextReader.open(path)) {
+				Json child = new Json();
+				child.setIgnoreUnknownFields(true);
+				registerSerializers(child, options, childPath);
+				return child.fromJson(type, reader);
+			} finally {
+				includes.remove(path);
+			}
+		} catch (IOException | RuntimeException e) {
+			java.util.logging.Logger.getGlobal().warning("Skipping unreadable JSON skin include");
+			return null;
+		}
+	}
+
 	private class ObjectSerializer<T> extends Serializer<T> {
 
 		public ObjectSerializer(HashSet<Integer> op, Path path) {
@@ -232,17 +268,7 @@ public class JsonSkinSerializer {
 				}
 				return (T)json.readValue(cls, val);
 			} else if (jsonValue.isObject() && jsonValue.has("include")) {
-				Json subJson = new Json();
-				subJson.setIgnoreUnknownFields(true);
-				File file = pathGetter.apply(path.getParent().toString() + "/" + jsonValue.get("include").asString());
-				if (file.exists()) {
-					setSerializers(subJson, this.options, file.toPath());
-					try {
-						return (T)subJson.fromJson(cls, new FileReader(file));
-					} catch (FileNotFoundException e) {
-					}
-				}
-				return null;
+				return (T) readInclude(path, jsonValue, cls, options);
 			} else {
 				// literal
 				T instance = null;
@@ -325,17 +351,8 @@ public class JsonSkinSerializer {
 		}
 
 		private void includeArray(Json json, JsonValue jsonValue, Class cls, ArrayList<T> items) {
-			Json subJson = new Json();
-			subJson.setIgnoreUnknownFields(true);
-			File file = pathGetter.apply(path.getParent().toString() + "/" + jsonValue.get("include").asString());
-			if (file.exists()) {
-				setSerializers(subJson, this.options, file.toPath());
-				try {
-					T[] array = (T[])subJson.fromJson(cls, new FileReader(file));
-					Collections.addAll(items, array);
-				} catch (FileNotFoundException e) {
-				}
-			}
+			T[] array = (T[]) readInclude(path, jsonValue, cls, options);
+			if (array != null) Collections.addAll(items, array);
 		}
 	}
 

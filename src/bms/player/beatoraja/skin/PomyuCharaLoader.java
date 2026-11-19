@@ -4,9 +4,7 @@ import static bms.player.beatoraja.skin.SkinProperty.*;
 
 import java.io.BufferedReader;
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.IOException;
-import java.io.InputStreamReader;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -90,8 +88,7 @@ public class PomyuCharaLoader {
 			List<List<String>> patternData = new ArrayList<>();
 			for(int i = 0; i <= LAYER; i++) patternData.add(new ArrayList<>());
 
-			try (BufferedReader br = new BufferedReader(
-				new InputStreamReader(new FileInputStream(chp), "MS932"))) {
+			try (BufferedReader br = SkinTextReader.open(chp.toPath())) {
 				String line;
 				while ((line = br.readLine()) != null) {
 					if (line.startsWith("#") ) {

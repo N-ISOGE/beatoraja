@@ -1,7 +1,6 @@
 package bms.player.beatoraja.skin.lua;
 
 import java.io.*;
-import java.net.*;
 
 import com.badlogic.gdx.math.MathUtils;
 import org.luaj.vm2.*;
@@ -49,23 +48,9 @@ final class SkinHttpLuaApiExporter implements LuaApiExporter {
 	}
 
 	private LuaTable readHttpLines(String urlText, int timeout, int maxBytes) throws IOException {
-		URI uri = URI.create(urlText);
-		String scheme = uri.getScheme();
-		if(!"http".equalsIgnoreCase(scheme) && !"https".equalsIgnoreCase(scheme)) {
-			throw new IOException("unsupported scheme: " + scheme);
-		}
-
-		URL url = uri.toURL();
-		HttpURLConnection connection = (HttpURLConnection) url.openConnection();
-		connection.setRequestMethod("GET");
-		connection.setConnectTimeout(timeout);
-		connection.setReadTimeout(timeout);
-
-		try {
-			return toLuaLines(SkinHttpBody.read(connection, maxBytes));
-		} finally {
-			connection.disconnect();
-		}
+		SkinAsyncHttp.Result result = SkinAsyncHttp.download(urlText, timeout, maxBytes);
+		if (!"completed".equals(result.status())) throw new IOException(result.error());
+		return toLuaLines(result.body());
 	}
 
 	static LuaTable toLuaLines(byte[] body) throws IOException {

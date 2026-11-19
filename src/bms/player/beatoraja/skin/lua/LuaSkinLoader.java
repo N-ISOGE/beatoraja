@@ -55,6 +55,10 @@ public class LuaSkinLoader extends JSONSkinLoader {
 		super(state, c, new SkinLuaAccessor(false));
 	}
 
+	public LuaSkinLoader(MainState state, Config config, Path sandboxRoot) {
+		super(state, config, new SkinLuaAccessor(false, sandboxRoot));
+	}
+
 	@Override
 	public SkinHeader loadHeader(Path p) {
 		SkinHeader header = null;
@@ -112,7 +116,7 @@ public class LuaSkinLoader extends JSONSkinLoader {
 			put(Integer.class, LuaValue::toint);
 			put(float.class, LuaValue::tofloat);
 			put(Float.class, LuaValue::tofloat);
-			put(String.class, LuaValue::tojstring);
+			put(String.class, value -> value.isnil() ? null : value.checkjstring());
 			put(JsonSkin.FontFallback.class, lv -> {
 				JsonSkin.FontFallback fallback = new JsonSkin.FontFallback();
 				if (lv.isstring()) {
@@ -184,9 +188,14 @@ public class LuaSkinLoader extends JSONSkinLoader {
 			if (lv.istable()) {
 				LuaTable table = (LuaTable) lv;
 				LuaValue[] keys = table.keys();
+				for (LuaValue key : keys) {
+					if (!(key instanceof org.luaj.vm2.LuaInteger) || key.toint() < 1 || key.toint() > keys.length) {
+						throw new org.luaj.vm2.LuaError("Skin array must have consecutive integer keys");
+					}
+				}
 				Object array = Array.newInstance(componentClass, keys.length);
 				for (int i = 0; i < keys.length; i++) {
-					Array.set(array, i, fromLuaValue(componentClass, table.get(keys[i])));
+					Array.set(array, i, fromLuaValue(componentClass, table.rawget(i + 1)));
 				}
 				return (T) array;
 			} else {
