@@ -14,7 +14,7 @@ public class SongUtils {
 		}
 
 		if (path.startsWith(bmspath)) {
-			path = path.substring(bmspath.length() + 1);
+			path = path.substring(Math.min(path.length(), bmspath.length() + 1));
 		}
 		final int previousCrc32 = 0;
 		int crc = ~previousCrc32; // same as previousCrc32 ^ 0xFFFFFFFF
