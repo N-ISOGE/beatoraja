@@ -235,6 +235,11 @@ val regressionClasses = listOf(
     "bms.player.beatoraja.skin.BitmapTextRunsTest",
     "bms.player.beatoraja.skin.FontLifetimeTest",
     "bms.player.beatoraja.skin.BitmapFontLoaderTest",
+    "bms.player.beatoraja.song.ExtendedBmsDecoderTest",
+    "bms.player.beatoraja.song.MetadataRepairTest",
+    "bms.player.beatoraja.song.SongSearchTextTest",
+    "bms.player.beatoraja.song.ArchiveMigrationRollbackTest",
+    "bms.player.beatoraja.TableDataBoundaryTest",
     "bms.player.beatoraja.skin.lr2.PlayerReviewLevelTest",
     "bms.player.beatoraja.result.MusicResultReviewTest",
     "bms.player.beatoraja.result.MusicResultScoreDisplayTest",
@@ -373,6 +378,9 @@ val regressionTasks = regressionClasses.map { className ->
         systemProperty("java.awt.headless", "true")
         if (className.endsWith(".Nanasi1552ComparisonTest")) {
             providers.gradleProperty("nanasi1552Observations").orNull?.let { args("--observations", it) }
+        }
+        if (className.endsWith("ArchiveMigrationRollbackTest") || className.endsWith("MetadataRepairTest") || className.endsWith("ExtendedBmsDecoderTest")) {
+            doFirst { args(temporaryDir.resolve("run-${System.nanoTime()}").absolutePath) }
         }
     }
 }

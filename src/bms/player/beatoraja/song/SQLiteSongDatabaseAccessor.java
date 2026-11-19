@@ -13,6 +13,7 @@ import java.nio.file.Paths;
 import java.nio.file.SimpleFileVisitor;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.sql.*;
+import java.text.Normalizer;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Logger;
@@ -382,11 +383,24 @@ public class SQLiteSongDatabaseAccessor extends SQLiteDatabaseAccessor implement
 
 	}
 
+	private static String escapeLike(String value) {
+		return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
+	}
+
 	public SongData[] getSongDatasByText(String text) {
+		if (text == null) {
+			return SongData.EMPTY;
+		}
+		// 検索文字列の % _ \ は文字として扱う。保存値は正規化せず、検索語の入力形・NFC・NFDの各形で照合する。
+		// '%', '_' and '\' are literal. Stored values are not normalized; the search text is matched in its
+		// given, NFC and NFD forms, so the query stays inside SQLite.
+		Set<String> forms = new LinkedHashSet<>(List.of(text, Normalizer.normalize(text, Normalizer.Form.NFC),
+				Normalizer.normalize(text, Normalizer.Form.NFD)));
+		String columns = "rtrim(coalesce(title, '')||' '||coalesce(subtitle, '')||' '||coalesce(artist, '')||' '||coalesce(subartist, '')||' '||coalesce(genre, ''))";
+		String where = String.join(" OR ", Collections.nCopies(forms.size(), columns + " LIKE ? ESCAPE '\\'"));
+		Object[] params = forms.stream().map(form -> "%" + escapeLike(form) + "%").toArray();
 		try {
-			List<SongData> m = qr.query(
-					"SELECT * FROM song WHERE rtrim(title||' '||subtitle||' '||artist||' '||subartist||' '||genre) LIKE ?"
-							+ " GROUP BY sha256",songhandler, "%" + text + "%");
+			List<SongData> m = qr.query("SELECT * FROM song WHERE " + where + " GROUP BY sha256", songhandler, params);
 			return toSongDataArray(m);
 		} catch (Exception e) {
 			bms.player.beatoraja.input.text.TextInputDiagnostics.failure("search-db-failure", 0, e);
@@ -574,8 +588,8 @@ public class SQLiteSongDatabaseAccessor extends SQLiteDatabaseAccessor implement
 					StringBuilder dsql = new StringBuilder();
 					Object[] param = new String[bmsroot.length];
 					for (int i = 0; i < bmsroot.length; i++) {
-						dsql.append("path NOT LIKE ?");
-						param[i] = bmsroot[i] + "%";
+						dsql.append("path NOT LIKE ? ESCAPE '\\'");
+						param[i] = escapeLike(bmsroot[i]) + "%";
 						if (i < bmsroot.length - 1) {
 							dsql.append(" AND ");
 						}
@@ -701,13 +715,22 @@ public class SQLiteSongDatabaseAccessor extends SQLiteDatabaseAccessor implement
 			});
 
 			for (Path archive : archives) {
+				Savepoint migration = conn.setSavepoint();
 				try {
 					Path normalizedArchive = archive.toAbsolutePath().normalize();
-					Path destination = SongArchives.expandToSongDirectory(normalizedArchive);
+					// 失敗し得るSQLを移動前に実行し、展開失敗なら戻す。
+					// Finish fallible SQL before moving the archive; roll it back if extraction fails.
 					deleteArchiveRecords(conn, normalizedArchive);
+					Path destination = SongArchives.expandToSongDirectory(normalizedArchive);
 					Logger.getGlobal().info("楽曲アーカイブを展開しました : " + archive + " -> " + destination);
 				} catch (IOException e) {
+					conn.rollback(migration);
 					Logger.getGlobal().warning("楽曲アーカイブ展開失敗:" + archive + " : " + e.getMessage());
+				} catch (SQLException e) {
+					conn.rollback(migration);
+					throw e;
+				} finally {
+					conn.releaseSavepoint(migration);
 				}
 			}
 		}
@@ -718,9 +741,6 @@ public class SQLiteSongDatabaseAccessor extends SQLiteDatabaseAccessor implement
 			qr.update(conn, "DELETE FROM folder WHERE path LIKE ? ESCAPE '\\'", pathPrefix);
 		}
 
-		private String escapeLike(String value) {
-			return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
-		}
 
 		private BMSFolder createArchiveFolder(Path archive, String[] bmsroot, long lastModifiedTime, String rootDirectory) {
 			return new BMSFolder(SongArchives.virtualRoot(archive, rootDirectory), bmsroot, lastModifiedTime,
@@ -810,7 +830,7 @@ public class SQLiteSongDatabaseAccessor extends SQLiteDatabaseAccessor implement
 							}
 							continue;
 						}
-						String filename = child.getFileName().toString().toLowerCase();
+						String filename = child.getFileName().toString().toLowerCase(Locale.ROOT);
 						if (!txt && filename.endsWith(".txt")) {
 							txt = true;
 						}
@@ -851,8 +871,9 @@ public class SQLiteSongDatabaseAccessor extends SQLiteDatabaseAccessor implement
 				}
 				folders.parallelStream().filter(Objects::nonNull).forEach(folder -> {
 					try {
-						qr.update(property.conn, "DELETE FROM folder WHERE path LIKE ?", folder.getPath() + "%");
-						qr.update(property.conn, "DELETE FROM song WHERE path LIKE ?", folder.getPath() + "%");
+						String pathPrefix = escapeLike(folder.getPath()) + "%";
+						qr.update(property.conn, "DELETE FROM folder WHERE path LIKE ? ESCAPE '\\'", pathPrefix);
+						qr.update(property.conn, "DELETE FROM song WHERE path LIKE ? ESCAPE '\\'", pathPrefix);
 					} catch (SQLException e) {
 						Logger.getGlobal().severe("ディレクトリ内に存在しないフォルダレコード削除の例外:" + e.getMessage());
 					}
@@ -893,14 +914,14 @@ public class SQLiteSongDatabaseAccessor extends SQLiteDatabaseAccessor implement
 
 					BMSModel model;
 					try {
-						if (pathname.toLowerCase().endsWith(".bmson")) {
+						if (pathname.toLowerCase(Locale.ROOT).endsWith(".bmson")) {
 							if (bmsondecoder == null) {
 								bmsondecoder = new BMSONDecoder(BMSModel.LNTYPE_LONGNOTE);
 							}
 							model = bmsondecoder.decode(chartPath);
 						} else {
 							if (bmsdecoder == null) {
-								bmsdecoder = new BMSDecoder(BMSModel.LNTYPE_LONGNOTE);
+								bmsdecoder = new ExtendedBMSDecoder(BMSModel.LNTYPE_LONGNOTE);
 							}
 							model = bmsdecoder.decode(chartPath);
 						}
@@ -985,8 +1006,8 @@ public class SQLiteSongDatabaseAccessor extends SQLiteDatabaseAccessor implement
 				if (song.getDifficulty() != 0) {
 					return;
 				}
-				String fullTitle = (song.getTitle() + song.getSubtitle()).toLowerCase();
-				String diffName = song.getSubtitle().toLowerCase();
+				String fullTitle = (song.getTitle() + song.getSubtitle()).toLowerCase(Locale.ROOT);
+				String diffName = song.getSubtitle().toLowerCase(Locale.ROOT);
 				if (diffName.contains("beginner")) song.setDifficulty(1);
 				else if (diffName.contains("normal")) song.setDifficulty(2);
 				else if (diffName.contains("hyper")) song.setDifficulty(3);
@@ -1076,8 +1097,8 @@ public class SQLiteSongDatabaseAccessor extends SQLiteDatabaseAccessor implement
 			StringBuilder sql = new StringBuilder();
 			Object[] params = new Object[roots.length];
 			for (int index = 0; index < roots.length; index++) {
-				sql.append("path NOT LIKE ?");
-				params[index] = roots[index] + "%";
+				sql.append("path NOT LIKE ? ESCAPE '\\'");
+				params[index] = escapeLike(roots[index]) + "%";
 				if (index < roots.length - 1) {
 					sql.append(" AND ");
 				}
@@ -1231,8 +1252,9 @@ public class SQLiteSongDatabaseAccessor extends SQLiteDatabaseAccessor implement
 				try {
 					// System.out.println("Song Database : folder deleted - " +
 					// record.getPath());
-					qr.update(property.conn, "DELETE FROM folder WHERE path LIKE ?", folder.getPath() + "%");
-					qr.update(property.conn, "DELETE FROM song WHERE path LIKE ?", folder.getPath() + "%");
+					String pathPrefix = escapeLike(folder.getPath()) + "%";
+					qr.update(property.conn, "DELETE FROM folder WHERE path LIKE ? ESCAPE '\\'", pathPrefix);
+					qr.update(property.conn, "DELETE FROM song WHERE path LIKE ? ESCAPE '\\'", pathPrefix);
 				} catch (SQLException e) {
 					Logger.getGlobal().severe("ディレクトリ内に存在しないフォルダレコード削除の例外:" + e.getMessage());
 				}
@@ -1298,8 +1320,8 @@ public class SQLiteSongDatabaseAccessor extends SQLiteDatabaseAccessor implement
 				final SongData sd = decoded.song();
 				if (sd.getNotes() != 0 || model.getWavList().length != 0) {
 					if (sd.getDifficulty() == 0) {
-						final String fulltitle = (sd.getTitle() + sd.getSubtitle()).toLowerCase();
-						final String diffname = (sd.getSubtitle()).toLowerCase();
+						final String fulltitle = (sd.getTitle() + sd.getSubtitle()).toLowerCase(Locale.ROOT);
+						final String diffname = (sd.getSubtitle()).toLowerCase(Locale.ROOT);
 						if (diffname.contains("beginner")) {
 							sd.setDifficulty(1);
 						} else if (diffname.contains("normal")) {
@@ -1402,9 +1424,9 @@ public class SQLiteSongDatabaseAccessor extends SQLiteDatabaseAccessor implement
 							.decode(new ChartInformation(source, BMSModel.LNTYPE_LONGNOTE, null));
 				}
 				if (SongArchives.isVirtualPath(path)) {
-					return new BMSDecoder(BMSModel.LNTYPE_LONGNOTE).decode(SongArchives.readEntry(path), false, null);
+					return new ExtendedBMSDecoder(BMSModel.LNTYPE_LONGNOTE).decode(SongArchives.readEntry(path), false, null);
 				}
-				return new BMSDecoder(BMSModel.LNTYPE_LONGNOTE).decode(path);
+				return new ExtendedBMSDecoder(BMSModel.LNTYPE_LONGNOTE).decode(path);
 			} catch (Exception | LinkageError e) {
 				Logger.getGlobal().severe("Error while decoding chart at path: " + pathname + e.getMessage());
 				return null;
@@ -1600,6 +1622,106 @@ public class SQLiteSongDatabaseAccessor extends SQLiteDatabaseAccessor implement
 				throw failure;
 			}
 		}
+	}
+
+	@Override
+	public boolean isCorruptedMetadata(SongData song) {
+		if (song == null) {
+			return false;
+		}
+		return ExtendedBMSDecoder.isLegacyShiftJisMojibake(song.getTitle())
+				|| ExtendedBMSDecoder.isLegacyShiftJisMojibake(song.getArtist())
+				|| ExtendedBMSDecoder.isLegacyShiftJisMojibake(song.getGenre())
+				|| ExtendedBMSDecoder.containsMojibake(song.getTitle())
+				|| ExtendedBMSDecoder.containsMojibake(song.getArtist())
+				|| ExtendedBMSDecoder.containsMojibake(song.getGenre());
+	}
+
+	@Override
+	public List<SongData> findCorruptedSongs() {
+		try {
+			List<SongData> songs = qr.query("SELECT * FROM song", songhandler);
+			if (songs == null) {
+				return Collections.emptyList();
+			}
+			List<SongData> corrupted = new ArrayList<>();
+			for (SongData song : songs) {
+				if (isCorruptedMetadata(song)) {
+					corrupted.add(song);
+				}
+			}
+			return corrupted;
+		} catch (SQLException e) {
+			Logger.getGlobal().warning("Error querying songs for corruption validation: " + e.getMessage());
+			return Collections.emptyList();
+		}
+	}
+
+	@Override
+	public int rescanCorruptedSongs() {
+		List<SongData> corrupted = findCorruptedSongs();
+		if (corrupted == null || corrupted.isEmpty()) {
+			return 0;
+		}
+		int repaired = 0;
+		ExtendedBMSDecoder decoder = new ExtendedBMSDecoder(BMSModel.LNTYPE_LONGNOTE);
+		for (SongData song : corrupted) {
+			if (song.getPath() == null) {
+				continue;
+			}
+			String oldTitle = song.getTitle();
+			String oldArtist = song.getArtist();
+			String oldGenre = song.getGenre();
+			String newTitle = null;
+			String newArtist = null;
+			String newGenre = null;
+
+			Path chartPath = Paths.get(song.getPath());
+			if (!Files.exists(chartPath)) {
+				chartPath = root.resolve(song.getPath());
+			}
+			if (Files.exists(chartPath)) {
+				try {
+					BMSModel model = decoder.decode(chartPath);
+					if (model != null && model.getTitle() != null && !model.getTitle().isEmpty()) {
+						newTitle = model.getTitle();
+						newArtist = model.getArtist() != null ? model.getArtist() : oldArtist;
+						newGenre = model.getGenre() != null ? model.getGenre() : oldGenre;
+					}
+				} catch (Exception e) {
+					Logger.getGlobal().warning("Failed to decode corrupted song at " + song.getPath() + ": " + e.getMessage());
+				}
+			}
+
+			// ファイルから値を得られない場合は、既知の従来Shift_JISパターンから復旧を試みる。
+			// If decoding yields no value, try recovery from known legacy Shift_JIS patterns.
+			if (newTitle == null && ExtendedBMSDecoder.isLegacyShiftJisMojibake(oldTitle)) {
+				newTitle = ExtendedBMSDecoder.tryRecoverShiftJisMojibake(oldTitle);
+			}
+			if (newArtist == null && ExtendedBMSDecoder.isLegacyShiftJisMojibake(oldArtist)) {
+				newArtist = ExtendedBMSDecoder.tryRecoverShiftJisMojibake(oldArtist);
+			}
+			if (newGenre == null && ExtendedBMSDecoder.isLegacyShiftJisMojibake(oldGenre)) {
+				newGenre = ExtendedBMSDecoder.tryRecoverShiftJisMojibake(oldGenre);
+			}
+
+			String repairedTitle = newTitle != null ? newTitle : oldTitle;
+			String repairedArtist = newArtist != null ? newArtist : oldArtist;
+			String repairedGenre = newGenre != null ? newGenre : oldGenre;
+			if (!java.util.Objects.equals(repairedTitle, oldTitle)
+					|| !java.util.Objects.equals(repairedArtist, oldArtist)
+					|| !java.util.Objects.equals(repairedGenre, oldGenre)) {
+				try {
+					qr.update("UPDATE song SET title = ?, artist = ?, genre = ? WHERE path = ?",
+							repairedTitle, repairedArtist, repairedGenre,
+							song.getPath());
+					repaired++;
+				} catch (SQLException e) {
+					Logger.getGlobal().warning("Failed to update repaired song in database: " + e.getMessage());
+				}
+			}
+		}
+		return repaired;
 	}
 	
 	public static interface SongDatabaseAccessorPlugin {
