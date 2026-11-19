@@ -1,6 +1,7 @@
 package bms.player.beatoraja.song.archive;
 
 import java.io.IOException;
+import java.io.ByteArrayInputStream;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -14,7 +15,7 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 import java.util.zip.ZipOutputStream;
 
-/** ZIP compatibility through both the JDK UTF-8 reader and Commons CP932 fallback. */
+/** ZIP compatibility for central-directory names and bounded reads. */
 public final class ZipSongArchiveTest {
     private static final String DIRECTORY = "\u697d\u66f2/";
 
@@ -23,12 +24,36 @@ public final class ZipSongArchiveTest {
         try {
             verifyArchive(root, "utf8", StandardCharsets.UTF_8);
             verifyArchive(root, "cp932", Charset.forName("MS932"));
+            verifyUnicodePath(root);
+            try (var stream = SongArchive.limitedEntry(new ByteArrayInputStream(new byte[] {1, 2, 3}), 2, "fixture")) {
+                check(stream.skip(1) == 1 && stream.read() == 2, "boundary reads and skips");
+                expectIOException(() -> stream.read());
+            }
         } finally {
             try (var paths = Files.walk(root)) {
                 for (Path path : paths.sorted(Comparator.reverseOrder()).toList()) Files.deleteIfExists(path);
             }
         }
         System.out.println("ZipSongArchiveTest passed");
+    }
+
+    private static void verifyUnicodePath(Path root) throws IOException {
+        Path archive = root.resolve("unicode-path.zip");
+        String raw = "ascii.bms";
+        String display = "한글.bms";
+        try (var zip = new org.apache.commons.compress.archivers.zip.ZipArchiveOutputStream(archive)) {
+            zip.setEncoding("MS932");
+            zip.setUseLanguageEncodingFlag(false);
+            var entry = new org.apache.commons.compress.archivers.zip.ZipArchiveEntry(raw);
+            entry.addExtraField(new org.apache.commons.compress.archivers.zip.UnicodePathExtraField(
+                    display, raw.getBytes(StandardCharsets.US_ASCII)));
+            zip.putArchiveEntry(entry);
+            zip.write(7);
+            zip.closeArchiveEntry();
+        }
+        var reader = new ZipSongArchive();
+        check(reader.listEntries(archive).equals(List.of(display)), "CRC-verified Unicode Path name");
+        check(Arrays.equals(reader.readEntry(archive, display), new byte[] {7}), "Unicode Path read");
     }
 
     private static void verifyArchive(Path root, String label, Charset charset) throws Exception {

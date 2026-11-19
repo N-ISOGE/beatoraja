@@ -7,6 +7,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -16,6 +17,7 @@ import com.github.junrar.Archive;
 import com.github.junrar.ArchiveOptions;
 import com.github.junrar.exception.RarException;
 import com.github.junrar.rarfile.FileHeader;
+import com.github.junrar.rarfile.HostSystem;
 
 /** RAR implementation backed by Junrar. */
 public final class RarSongArchive extends SongArchive {
@@ -30,19 +32,13 @@ public final class RarSongArchive extends SongArchive {
 	@Override
 	public List<String> listEntries(Path archive) throws IOException {
 		try (Archive rar = open(archive)) {
-			List<FileHeader> headers = rar.getFileHeaders();
-			if (headers.size() > MAX_ENTRY_COUNT) {
-				throw new IOException("RAR contains too many entries: " + archive);
-			}
+			List<FileHeader> headers = checkedHeaders(rar, archive);
 			List<String> entries = new ArrayList<>();
-			Set<String> names = new HashSet<>();
 			for (FileHeader header : headers) {
-				validate(header, archive);
 				if (header.isDirectory()) {
 					continue;
 				}
-				String name = checkedEntryName(names, header.getFileName());
-				entries.add(name);
+				entries.add(normalizeEntryName(header.getFileName()));
 			}
 			return entries;
 		} catch (RarException e) {
@@ -53,9 +49,8 @@ public final class RarSongArchive extends SongArchive {
 	@Override
 	public long entrySize(Path archive, String entryName) throws IOException {
 		try (Archive rar = open(archive)) {
-			for (FileHeader header : rar.getFileHeaders()) {
-				validate(header, archive);
-				if (!header.isDirectory() && entryName.equals(normalizeEntryNameOrNull(header.getFileName()))) {
+			for (FileHeader header : checkedHeaders(rar, archive)) {
+				if (!header.isDirectory() && entryMatches(entryName, header.getFileName())) {
 					return header.getFullUnpackSize();
 				}
 			}
@@ -70,10 +65,13 @@ public final class RarSongArchive extends SongArchive {
 		try {
 			Archive rar = open(archive);
 			try {
-				for (FileHeader header : rar.getFileHeaders()) {
-					validate(header, archive);
-					if (!header.isDirectory() && entryName.equals(normalizeEntryNameOrNull(header.getFileName()))) {
-						return new FilterInputStream(rar.getInputStream(header)) {
+				for (FileHeader header : checkedHeaders(rar, archive)) {
+					if (!header.isDirectory() && entryMatches(entryName, header.getFileName())) {
+						long limit = entryLimit(entryName);
+						if (header.getFullUnpackSize() > limit) {
+							throw new IOException("RAR entry exceeds the size limit: " + entryName);
+						}
+						return new FilterInputStream(limitedEntry(rar.getInputStream(header), limit, entryName)) {
 							@Override
 							public void close() throws IOException {
 								try {
@@ -85,10 +83,13 @@ public final class RarSongArchive extends SongArchive {
 						};
 					}
 				}
-				rar.close();
 				throw new IOException("RAR entry does not exist: " + entryName);
 			} catch (IOException | RuntimeException e) {
-				rar.close();
+				try {
+					rar.close();
+				} catch (IOException closeFailure) {
+					e.addSuppressed(closeFailure);
+				}
 				throw e;
 			}
 		} catch (RarException e) {
@@ -99,9 +100,8 @@ public final class RarSongArchive extends SongArchive {
 	@Override
 	public byte[] readEntry(Path archive, String entryName) throws IOException {
 		try (Archive rar = open(archive)) {
-			for (FileHeader header : rar.getFileHeaders()) {
-				validate(header, archive);
-				if (header.isDirectory() || !entryName.equals(normalizeEntryNameOrNull(header.getFileName()))) {
+			for (FileHeader header : checkedHeaders(rar, archive)) {
+				if (header.isDirectory() || !entryMatches(entryName, header.getFileName())) {
 					continue;
 				}
 				long size = header.getFullUnpackSize();
@@ -121,29 +121,54 @@ public final class RarSongArchive extends SongArchive {
 
 	@Override
 	public void extract(Path archive, Path root) throws IOException {
+		Files.createDirectories(root);
 		try (Archive rar = open(archive)) {
-			List<FileHeader> headers = rar.getFileHeaders();
-			if (headers.size() > MAX_ENTRY_COUNT) {
-				throw new IOException("RAR contains too many entries: " + archive);
-			}
-			Set<String> names = new HashSet<>();
+			List<FileHeader> headers = checkedHeaders(rar, archive);
 			long[] extractedSize = { 0 };
 			for (FileHeader header : headers) {
-				validate(header, archive);
 				if (header.isDirectory()) {
 					continue;
 				}
-				String name = checkedEntryName(names, header.getFileName());
+				String name = normalizeEntryName(header.getFileName());
 				Path target = extractionTarget(root, name, "RAR entry");
-				Files.createDirectories(target.getParent());
-				try (OutputStream output = new LimitedOutputStream(Files.newOutputStream(target), extractedSize,
-						MAX_EXTRACTED_SIZE, "RAR is too large after extraction: " + archive)) {
+				try (OutputStream archiveOutput = new LimitedOutputStream(Files.newOutputStream(target, StandardOpenOption.CREATE_NEW),
+						extractedSize, MAX_EXTRACTED_SIZE, "RAR is too large after extraction: " + archive);
+						OutputStream output = new LimitedOutputStream(archiveOutput, new long[1], entryLimit(name),
+								"RAR entry exceeds the size limit: " + name)) {
 					rar.extractFile(header, output);
 				}
 			}
 		} catch (RarException e) {
 			throw new IOException("Unable to extract RAR archive: " + archive, e);
 		}
+	}
+
+	private List<FileHeader> checkedHeaders(Archive rar, Path archive) throws IOException {
+		List<FileHeader> headers = rar.getFileHeaders();
+		if (headers.size() > MAX_ENTRY_COUNT) {
+			throw new IOException("RAR contains too many entries: " + archive);
+		}
+		Set<String> names = new HashSet<>();
+		Set<String> directories = new HashSet<>();
+		for (FileHeader header : headers) {
+			validate(header, archive);
+			String raw = header.getFileName();
+			if (header.isDirectory() && (raw.endsWith("/") || raw.endsWith("\\"))) {
+				raw = raw.substring(0, raw.length() - 1);
+			}
+			String name = normalizeEntryNameOrNull(raw);
+			if (name == null) {
+				throw new IOException("Unsafe RAR entry: " + raw);
+			}
+			registerEntry(names, directories, name, header.isDirectory());
+		}
+		return headers;
+	}
+
+	private boolean entryMatches(String requested, String stored) {
+		String name = normalizeEntryNameOrNull(requested);
+		String match = normalizeEntryNameOrNull(stored);
+		return name != null && match != null && entryKey(name).equals(entryKey(match));
 	}
 
 	private Archive open(Path archive) throws IOException, RarException {
@@ -166,7 +191,8 @@ public final class RarSongArchive extends SongArchive {
 	}
 
 	private void validate(FileHeader header, Path archive) throws IOException {
-		if (header.getRedirection() != null) {
+		int unixType = header.getHostOS() == HostSystem.unix ? header.getFileAttr() & 0170000 : 0;
+		if (header.getRedirection() != null || (unixType != 0 && unixType != 0100000 && unixType != 0040000)) {
 			throw new IOException("RAR links are not supported: " + archive);
 		}
 		if (header.isRar5Container() && header.getRar5WinSize() > MAX_DICTIONARY_SIZE) {
@@ -180,11 +206,4 @@ public final class RarSongArchive extends SongArchive {
 		}
 	}
 
-	private String checkedEntryName(Set<String> names, String entryName) throws IOException {
-		String name = normalizeEntryNameOrNull(entryName);
-		if (name == null || !names.add(name)) {
-			throw new IOException("Unsafe RAR entry: " + entryName);
-		}
-		return name;
-	}
 }

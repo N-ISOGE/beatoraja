@@ -126,6 +126,10 @@ public final class SongArchives {
 
 			Path archiveStorage = parent.resolve(ARCHIVE_STORAGE_DIRECTORY);
 			Files.createDirectories(archiveStorage);
+			if (!Files.isDirectory(archiveStorage, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+					|| !archiveStorage.toRealPath().equals(parent.toRealPath().resolve(ARCHIVE_STORAGE_DIRECTORY))) {
+				throw new IOException("Unsafe archive storage directory: " + archiveStorage);
+			}
 			Path storedArchive = uniqueArchivePath(archiveStorage, normalizedArchive.getFileName().toString());
 			move(normalizedArchive, storedArchive);
 			try {
@@ -158,12 +162,13 @@ public final class SongArchives {
 	}
 
 	static boolean hasEntry(Path archive, String entryName) throws IOException {
-		return listEntries(archive).contains(entryName);
+		String key = SongArchive.entryKey(entryName);
+		return listEntries(archive).stream().map(SongArchive::entryKey).anyMatch(key::equals);
 	}
 
 	static boolean hasDirectory(Path archive, String entryName) throws IOException {
-		String prefix = entryName.isEmpty() ? "" : entryName + "/";
-		return listEntries(archive).stream().anyMatch(candidate -> candidate.startsWith(prefix));
+		String prefix = entryName.isEmpty() ? "" : SongArchive.entryKey(entryName) + "/";
+		return listEntries(archive).stream().map(SongArchive::entryKey).anyMatch(candidate -> candidate.startsWith(prefix));
 	}
 
 	static long entrySize(Path archive, String entryName) throws IOException {
