@@ -387,59 +387,21 @@ public class SQLiteSongDatabaseAccessor extends SQLiteDatabaseAccessor implement
 		return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
 	}
 
-	public static void registerNfcFunction(Connection conn) throws SQLException {
-		org.sqlite.Function.create(conn, "nfc", new org.sqlite.Function() {
-			@Override
-			protected void xFunc() throws SQLException {
-				String val = value_text(0);
-				if (val == null) {
-					result();
-				} else {
-					result(Normalizer.normalize(val, Normalizer.Form.NFC));
-				}
-			}
-		});
-	}
-
-	private static boolean isAscii(String str) {
-		for (int i = 0; i < str.length(); i++) {
-			if (str.charAt(i) > 0x7F) {
-				return false;
-			}
-		}
-		return true;
-	}
-
 	public SongData[] getSongDatasByText(String text) {
 		if (text == null) {
 			return SongData.EMPTY;
 		}
-		if (isAscii(text)) {
-			try (Connection conn = ds.getConnection()) {
-				List<SongData> m = qr.query(conn,
-						"SELECT * FROM song WHERE rtrim(coalesce(title, '')||' '||coalesce(subtitle, '')||' '||coalesce(artist, '')||' '||coalesce(subartist, '')||' '||coalesce(genre, '')) LIKE ? ESCAPE '\\'"
-								+ " GROUP BY sha256", songhandler, "%" + escapeLike(text) + "%");
-				return toSongDataArray(m);
-			} catch (Exception e) {
-				Logger.getGlobal().severe("song.db更新時の例外:" + e.getMessage());
-			}
-			return SongData.EMPTY;
-		}
-
-		String normalizedText = Normalizer.normalize(text, Normalizer.Form.NFC);
-		try (Connection conn = ds.getConnection()) {
-			registerNfcFunction(conn);
-			try {
-				List<SongData> m = qr.query(conn,
-						"SELECT * FROM song WHERE nfc(rtrim(coalesce(title, '')||' '||coalesce(subtitle, '')||' '||coalesce(artist, '')||' '||coalesce(subartist, '')||' '||coalesce(genre, ''))) LIKE ? ESCAPE '\\'"
-								+ " GROUP BY sha256", songhandler, "%" + escapeLike(normalizedText) + "%");
-				return toSongDataArray(m);
-			} finally {
-				try {
-					org.sqlite.Function.destroy(conn, "nfc");
-				} catch (Exception ignored) {
-				}
-			}
+		// 検索文字列の % _ \ は文字として扱う。保存値は正規化せず、検索語の入力形・NFC・NFDの各形で照合する。
+		// '%', '_' and '\' are literal. Stored values are not normalized; the search text is matched in its
+		// given, NFC and NFD forms, so the query stays inside SQLite.
+		Set<String> forms = new LinkedHashSet<>(List.of(text, Normalizer.normalize(text, Normalizer.Form.NFC),
+				Normalizer.normalize(text, Normalizer.Form.NFD)));
+		String columns = "rtrim(coalesce(title, '')||' '||coalesce(subtitle, '')||' '||coalesce(artist, '')||' '||coalesce(subartist, '')||' '||coalesce(genre, ''))";
+		String where = String.join(" OR ", Collections.nCopies(forms.size(), columns + " LIKE ? ESCAPE '\\'"));
+		Object[] params = forms.stream().map(form -> "%" + escapeLike(form) + "%").toArray();
+		try {
+			List<SongData> m = qr.query("SELECT * FROM song WHERE " + where + " GROUP BY sha256", songhandler, params);
+			return toSongDataArray(m);
 		} catch (Exception e) {
 			bms.player.beatoraja.input.text.TextInputDiagnostics.failure("search-db-failure", 0, e);
 			Logger.getGlobal().severe("song.db更新時の例外:" + e.getMessage());
@@ -945,7 +907,7 @@ public class SQLiteSongDatabaseAccessor extends SQLiteDatabaseAccessor implement
 					long lastModifiedTime = getLastModifiedTime(chartPath);
 					String pathname = relativePath(chartPath);
 					SongData record = removeRecord(records, pathname);
-					if (record != null && record.getDate() == lastModifiedTime && !isCorruptedMetadata(record)) {
+					if (record != null && record.getDate() == lastModifiedTime) {
 						updatePreview(record, chartPath, pathname, property);
 						continue;
 					}
@@ -1314,7 +1276,7 @@ public class SQLiteSongDatabaseAccessor extends SQLiteDatabaseAccessor implement
 					final SongData record = records.get(i);
 					if (record != null && record.getPath().equals(pathname)) {
 						records.set(i, null);
-						if (record.getDate() == lastModifiedTime && !isCorruptedMetadata(record)) {
+						if (record.getDate() == lastModifiedTime) {
 							update = false;
 
 							String oldpp = record.getPreview() == null ? "" : record.getPreview();
