@@ -169,6 +169,15 @@ public class Config implements Validatable {
 	 * スキン画像のキャッシュイメージを作成するかどうか
 	 */
     private boolean cacheSkinImage = false;
+    private boolean restrictSkinPreviewEffects;
+
+    public boolean isRestrictSkinPreviewEffects() {
+        return restrictSkinPreviewEffects;
+    }
+
+    public void setRestrictSkinPreviewEffects(boolean restrictSkinPreviewEffects) {
+        this.restrictSkinPreviewEffects = restrictSkinPreviewEffects;
+    }
     /**
      * songinfoデータベースを使用するかどうか
      */
