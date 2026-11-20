@@ -245,7 +245,7 @@ public class IsolatedIRConnection implements IRConnection, AutoCloseable {
 			Response response = exchange(session, request);
 			synchronized (lifecycle) {
 				if (closed || worker != session) return new Invocation(Response.error("IR connection closed"), attempted);
-				if (METHOD_LOGIN.equals(request.method) && response.succeeded) {
+				if (METHOD_LOGIN.equals(request.method) && response.succeeded && request.account != null) {
 					Account saved = new Account();
 					saved.id = request.account.id; saved.password = request.account.password; saved.name = request.account.name;
 					lastLogin = saved;
@@ -274,7 +274,7 @@ public class IsolatedIRConnection implements IRConnection, AutoCloseable {
 		Future<String> future = session.io.submit(() -> {
 			// Captures this generation's pipes, never mutable connection fields.
 			session.writer.write(payload); session.writer.newLine(); session.writer.flush();
-			return session.reader.readLine();
+			return readLine(session.reader, MAX_LINE_BYTES);
 		});
 		try (var timing = StartupDiagnostics.measure(Step.IR_RESPONSE_WAIT, session.process.pid())) {
 			String line;
@@ -328,14 +328,14 @@ public class IsolatedIRConnection implements IRConnection, AutoCloseable {
 	private final class Worker {
 		final Process process;
 		final BufferedWriter writer;
-		final BufferedReader reader;
+		final BufferedInputStream reader;
 		final ExecutorService io;
 		final AtomicBoolean stopped = new AtomicBoolean();
 		boolean authenticated;
 		Worker(Process process, int generation) {
 			this.process = process;
 			writer = new BufferedWriter(new OutputStreamWriter(process.getOutputStream(), StandardCharsets.UTF_8));
-			reader = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8));
+			reader = new BufferedInputStream(process.getInputStream());
 			io = Executors.newSingleThreadExecutor(task -> {
 				Thread thread = new Thread(task, "isolated-ir-io-" + irName + "-" + generation);
 				thread.setDaemon(true); return thread;

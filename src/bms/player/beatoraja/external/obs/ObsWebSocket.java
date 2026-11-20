@@ -16,6 +16,7 @@ import java.util.concurrent.*;
 
 /** OBS WebSocket 5.x with bounded requests, connection generations and serialized sends. */
 final class ObsWebSocket implements ObsTransport {
+    private static final int MAX_MESSAGE_CHARS = 1024 * 1024;
     private final ScheduledExecutorService executor;
     private final URI uri;
     private final String password;
@@ -34,7 +35,7 @@ final class ObsWebSocket implements ObsTransport {
 
     ObsWebSocket(Config config, ScheduledExecutorService executor) {
         this.executor = executor;
-        password = config.getObsWsPass();
+        password = config.getObsWsPass() != null ? config.getObsWsPass() : "";
         try { uri = new URI("ws", null, config.getObsWsHost(), config.getObsWsPort(), null, null, null); }
         catch (Exception invalid) { throw new IllegalArgumentException("Invalid OBS address"); }
     }
@@ -57,8 +58,8 @@ final class ObsWebSocket implements ObsTransport {
                         ws.request(1);
                     }
                     public CompletionStage<?> onText(WebSocket ws, CharSequence part, boolean last) {
-                        if (text.length() + part.length() > 1024 * 1024) {
-                            ws.abort(); dispatch(() -> lost(session)); return null;
+                        if (exceedsTextLimit(text.length(), part.length())) {
+                            text.setLength(0); ws.abort(); dispatch(() -> lost(session)); return null;
                         }
                         text.append(part);
                         if (last) {
@@ -76,6 +77,10 @@ final class ObsWebSocket implements ObsTransport {
         connecting.whenComplete((ws, error) -> { if (error != null) dispatch(() -> lost(session)); });
     }
 
+    static boolean exceedsTextLimit(int accumulated, int addition) {
+        return accumulated < 0 || addition < 0 || accumulated > MAX_MESSAGE_CHARS || addition > MAX_MESSAGE_CHARS - accumulated;
+    }
+
     private boolean dispatch(Runnable task) {
         try { executor.execute(task); return true; }
         catch (RejectedExecutionException stopped) { return false; }
@@ -84,13 +89,18 @@ final class ObsWebSocket implements ObsTransport {
         if (closed || session != generation) return;
         try {
             JsonValue packet = new JsonReader().parse(message);
+            if (packet == null || !packet.isObject()) { lost(session); return; }
             JsonValue data = packet.get("d");
             switch (packet.getInt("op")) {
                 case 0 -> {
+                    if (data == null || !data.isObject()) { lost(session); return; }
                     JsonValue identify = object("rpcVersion", 1, "eventSubscriptions", 65);
                     JsonValue authentication = data.get("authentication");
-                    if (authentication != null) identify.addChild("authentication", new JsonValue(
-                            authentication(password, authentication.getString("salt"), authentication.getString("challenge"))));
+                    if (authentication != null) {
+                        if (!authentication.isObject()) { lost(session); return; }
+                        identify.addChild("authentication", new JsonValue(
+                                authentication(password, authentication.getString("salt"), authentication.getString("challenge"))));
+                    }
                     send(object("op", 1, "d", identify));
                 }
                 case 2 -> {
@@ -99,10 +109,12 @@ final class ObsWebSocket implements ObsTransport {
                     if (handshake != null) handshake.cancel(false);
                     listener.status("Connected"); listener.ready();
                 }
-                case 5 -> { if (ready) listener.event(data.getString("eventType"), data.get("eventData")); }
+                case 5 -> { if (ready && data != null && data.isObject()) listener.event(data.getString("eventType"), data.get("eventData")); }
                 case 7 -> {
+                    if (data == null || !data.isObject()) { lost(session); return; }
                     String id = data.getString("requestId");
                     JsonValue status = data.get("requestStatus");
+                    if (status == null || !status.isObject()) { lost(session); return; }
                     boolean success = status.getBoolean("result");
                     int code = status.getInt("code", 0);
                     var future = pending.remove(id);
