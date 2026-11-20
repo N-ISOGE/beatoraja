@@ -65,6 +65,10 @@ public final class SkinHttpLimitsTest {
         BODIES.put("/maximum", new byte[SkinHttpBody.MAX_BYTES]);
         LuaTable sync = new LuaTable();
         new SkinHttpLuaApiExporter().export(sync);
+        LAST.set(null);
+        check(sync.get("http_get").call(LuaValue.valueOf("http://127.0.0.1/lines")).isnil(),
+                "Synchronous HTTP rejects non-public destinations");
+        check(LAST.get() == null, "Rejected destination must not open a connection");
         for (String name : new String[] {"http_get", "http_get_lines"}) {
             check(sync.get(name).call(LuaValue.valueOf("http://8.8.8.8/large")).isnil(), "Default limit: " + name);
             check(LAST.get().closed && LAST.get().disconnected, "Failed synchronous request closes resources");
@@ -81,8 +85,11 @@ public final class SkinHttpLimitsTest {
         var lua = new SkinLuaAccessor(false);
         lua.exec("local j=require('luajava'); local c=j.newInstance('java.net.URL','http://8.8.8.8/large'):openConnection(); "
                 + "assert(not pcall(function() c:getInputStream() end)); "
+                + "local denied=j.newInstance('java.net.URL','http://127.0.0.1/lines'):openConnection(); "
+                + "assert(not pcall(function() denied:connect() end)); "
                 + "local d=j.newInstance('java.net.URL','http://8.8.8.8/large'):openConnection(); "
-                + "d:setResponseLimitBytes(2*1024*1024); local r=d:getInputStream(); assert(#r:readLine()==1024*1024+1); "
+                + "d:setResponseLimitBytes(2*1024*1024); assert(d:getResponseCode()==200); "
+                + "local r=d:getInputStream(); assert(#r:readLine()==1024*1024+1); "
                 + "r:close(); assert(r:readLine()==nil); "
                 + "local e=j.newInstance('java.net.URL','http://8.8.8.8/lines'):openConnection(); local l=e:getInputStream(); "
                 + "local n=0; while l:readLine() do n=n+1 end; assert(n==4096); "

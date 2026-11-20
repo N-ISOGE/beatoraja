@@ -5,7 +5,6 @@ import bms.player.beatoraja.SkinConfig;
 
 import static bms.player.beatoraja.skin.SkinProperty.OPTION_RANDOM_VALUE;
 
-import java.io.File;
 import java.nio.file.Path;
 import java.util.*;
 
@@ -182,27 +181,9 @@ public final class SkinHeader {
 					if (!file.path.equals("Random")) {
 						customFile.filename = file.path;
 					} else {
-						String ext = customFile.path.substring(customFile.path.lastIndexOf("*") + 1);
-						if (customFile.path.contains("|")) {
-							if (customFile.path.length() > customFile.path.lastIndexOf('|') + 1) {
-								ext = customFile.path.substring(customFile.path.lastIndexOf("*") + 1, customFile.path.indexOf('|')) + customFile.path.substring(customFile.path.lastIndexOf('|') + 1);
-							} else {
-								ext = customFile.path.substring(customFile.path.lastIndexOf("*") + 1, customFile.path.indexOf('|'));
-							}
-						}
-						final int slashindex = customFile.path.lastIndexOf('/');
-						File dir = slashindex != -1 ? new File(customFile.path.substring(0, slashindex)) : new File(customFile.path);
-						if (dir.exists() && dir.isDirectory()) {
-							List<File> l = new ArrayList<File>();
-							for (File subfile : dir.listFiles()) {
-								if (subfile.getPath().toLowerCase().endsWith(ext)) {
-									l.add(subfile);
-								}
-							}
-							if (l.size() > 0) {
-								String filename = l.get((int) (Math.random() * l.size())).getName();
-								customFile.filename = filename;
-							}
+						List<String> choices = SkinCustomization.fileChoices(customFile);
+						if (!choices.isEmpty()) {
+							customFile.filename = choices.get(java.util.concurrent.ThreadLocalRandom.current().nextInt(choices.size()));
 						}
 					}
 				}

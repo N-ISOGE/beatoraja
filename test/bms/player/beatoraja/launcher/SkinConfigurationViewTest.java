@@ -1,5 +1,7 @@
 package bms.player.beatoraja.launcher;
 
+import javafx.scene.control.CheckBox;
+import bms.player.beatoraja.Config;
 import java.io.IOException;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
@@ -57,6 +59,24 @@ public final class SkinConfigurationViewTest {
                 ResourceBundle.getBundle("resources.UIResources", Locale.ROOT));
         Parent root = loader.load();
         SkinConfigurationView view = loader.getController();
+        var setting = (CheckBox) loader.getNamespace().get("restrictSkinPreviewEffects");
+        var system = new Config();
+        Path fixture = Files.createTempDirectory("skin-settings");
+        try {
+            system.setSkinpath(fixture.toString());
+            view.update(system);
+            if (setting.isSelected()) throw new AssertionError("Legacy default must preserve preview behavior");
+            setting.fire();
+            if (!system.isRestrictSkinPreviewEffects()) throw new AssertionError("Checkbox must update system config");
+            var json = new com.badlogic.gdx.utils.Json();
+            var reloaded = json.fromJson(Config.class, json.toJson(system));
+            view.update(reloaded);
+            if (!setting.isSelected()) throw new AssertionError("Saved restriction must load in the skin tab");
+            setting.fire();
+            if (reloaded.isRestrictSkinPreviewEffects()) throw new AssertionError("Restriction must be reversible");
+        } finally {
+            Files.delete(fixture);
+        }
         var player = new PlayerConfig();
         var playerField = SkinConfigurationView.class.getDeclaredField("player");
         playerField.setAccessible(true); playerField.set(view, player);

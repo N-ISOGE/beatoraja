@@ -14,8 +14,7 @@ final class SkinAsyncHttp implements Disposable {
             new ArrayBlockingQueue<>(32), runnable -> daemon(runnable, "Skin HTTP"));
     private static final ScheduledThreadPoolExecutor TIMER = timer();
     private static final ThreadPoolExecutor CLEANUP = new ThreadPoolExecutor(1, 1, 0, TimeUnit.SECONDS,
-            new ArrayBlockingQueue<>(32), runnable -> daemon(runnable, "Skin HTTP cleanup"),
-            new ThreadPoolExecutor.DiscardPolicy());
+            new ArrayBlockingQueue<>(32), runnable -> daemon(runnable, "Skin HTTP cleanup"));
 
     record Result(String status, int statusCode, byte[] body, String error) {
         static Result failed(String error) { return new Result("failed", 0, new byte[0], error); }
@@ -113,8 +112,8 @@ final class SkinAsyncHttp implements Disposable {
             return a != 0 && a != 10 && a != 127 && a < 224
                     && !(a == 100 && b >= 64 && b <= 127)
                     && !(a == 169 && b == 254) && !(a == 172 && b >= 16 && b <= 31)
-                    && !(a == 192 && (b == 0 || b == 168))
-                    && !(a == 198 && (b == 18 || b == 19 || b == 51))
+                    && !(a == 192 && (b == 168 || (b == 0 && ((bytes[2] & 255) == 0 || (bytes[2] & 255) == 2))))
+                    && !(a == 198 && (b == 18 || b == 19 || (b == 51 && (bytes[2] & 255) == 100)))
                     && !(a == 203 && b == 0 && (bytes[2] & 255) == 113);
         }
         // Only global unicast, excluding transition and documentation ranges.
@@ -124,24 +123,61 @@ final class SkinAsyncHttp implements Disposable {
     }
 
     private static Result download(String text, int timeout, Job job) throws Exception {
-        return download(text, timeout, job, uri -> {
-            for (InetAddress address : InetAddress.getAllByName(uri.getHost())) {
-                if (!isPublicAddress(address)) throw new IOException("Non-public HTTP destination denied");
-            }
-            return (HttpURLConnection) uri.toURL().openConnection(Proxy.NO_PROXY);
-        });
+        return download(text, timeout, job, SkinAsyncHttp::openPublicConnection);
+    }
+
+    static Result download(String text, int timeout, int maxBytes) throws IOException {
+        try {
+            return download(text, timeout, new Job(null, maxBytes));
+        } catch (IOException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IOException("Skin HTTP request failed", e);
+        }
+    }
+
+    private static HttpURLConnection openPublicConnection(URI uri) throws IOException {
+        InetAddress[] addresses = InetAddress.getAllByName(uri.getHost());
+        if (addresses.length == 0) throw new IOException("HTTP destination unavailable");
+        for (InetAddress address : addresses) {
+            if (!isPublicAddress(address)) throw new IOException("Non-public HTTP destination denied");
+        }
+        // URLConnection can resolve again when it connects. 接続時に再名前解決される場合がある。
+        return (HttpURLConnection) uri.toURL().openConnection(Proxy.NO_PROXY);
     }
 
     static Result download(String text, int timeout, Job job, ConnectionFactory connections) throws Exception {
+        try (OpenResponse response = openResponse(text, timeout, job, connections)) {
+            int status = response.status();
+            if (status < 200 || status >= 300) return new Result("failed", status, new byte[0], "HTTP status " + status);
+            return new Result("completed", status, response.readBody(job.maxBytes), "");
+        }
+    }
+
+    static OpenResponse openResponse(String text, int timeout) throws IOException {
+        try {
+            return openResponse(text, timeout, null, SkinAsyncHttp::openPublicConnection);
+        } catch (IOException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IOException("Skin HTTP request failed", e);
+        }
+    }
+
+    private static OpenResponse openResponse(String text, int timeout, Job job, ConnectionFactory connections) throws Exception {
         URI uri = validateUrl(text);
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeout);
         for (int redirects = 0; redirects <= 3; redirects++) {
+            int remaining = remainingMillis(deadline);
             HttpURLConnection connection = connections.open(uri);
-            connection.setInstanceFollowRedirects(false);
-            connection.setConnectTimeout(timeout);
-            connection.setReadTimeout(timeout);
-            connection.setRequestMethod("GET");
-            job.attach(connection);
+            boolean keep = false;
             try {
+                remaining = Math.min(remaining, remainingMillis(deadline));
+                connection.setInstanceFollowRedirects(false);
+                connection.setConnectTimeout(remaining);
+                connection.setReadTimeout(remaining);
+                connection.setRequestMethod("GET");
+                if (job != null) job.attach(connection);
                 int status = connection.getResponseCode();
                 if (status == 301 || status == 302 || status == 303 || status == 307 || status == 308) {
                     String location = connection.getHeaderField("Location");
@@ -153,11 +189,44 @@ final class SkinAsyncHttp implements Disposable {
                     uri = next;
                     continue;
                 }
-                if (status < 200 || status >= 300) return new Result("failed", status, new byte[0], "HTTP status " + status);
-                return new Result("completed", status, SkinHttpBody.read(connection, job.maxBytes), "");
-            } finally { connection.disconnect(); }
+                remainingMillis(deadline);
+                keep = true;
+                return new OpenResponse(connection, status, deadline);
+            } finally {
+                if (!keep) connection.disconnect();
+            }
         }
         throw new IOException("Too many HTTP redirects");
+    }
+
+    static int remainingMillis(long deadline) throws IOException {
+        long nanos = deadline - System.nanoTime();
+        if (nanos <= 0) throw new IOException("HTTP request timed out");
+        return (int) Math.max(1, TimeUnit.NANOSECONDS.toMillis(nanos));
+    }
+
+    static ScheduledFuture<?> closeOnDeadline(OpenResponse response, Runnable close) {
+        long remaining = Math.max(0, response.deadline() - System.nanoTime());
+        return TIMER.schedule(() -> queueCleanup(close), remaining, TimeUnit.NANOSECONDS);
+    }
+
+    private static void queueCleanup(Runnable close) {
+        try {
+            CLEANUP.execute(close);
+        } catch (RejectedExecutionException e) {
+            TIMER.schedule(() -> queueCleanup(close), 25, TimeUnit.MILLISECONDS);
+        }
+    }
+
+    record OpenResponse(HttpURLConnection connection, int status, long deadline) implements AutoCloseable {
+        byte[] readBody(int maxBytes) throws IOException {
+            remainingMillis(deadline);
+            return SkinHttpBody.read(connection, maxBytes, deadline);
+        }
+
+        @Override public void close() {
+            connection.disconnect();
+        }
     }
 
     static final class Job {
@@ -229,8 +298,8 @@ final class SkinAsyncHttp implements Disposable {
             }
             // Some JDK connections synchronize disconnect with a pending read/connect.
             // Never block the render thread or the deadline scheduler on native I/O.
-            // If cleanup is full, the worker still closes in finally after its socket timeout.
-            if (active != null) CLEANUP.execute(active::disconnect);
+            // The worker also closes in finally. ワーカーも終了時に接続を閉じる。
+            if (active != null) queueCleanup(active::disconnect);
         }
     }
 

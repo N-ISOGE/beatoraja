@@ -33,6 +33,8 @@ public final class SkinCompatibilityApiTest {
             Files.createDirectory(root.resolve("directory"));
             var accessor = new SkinLuaAccessor(false);
             accessor.setDirectory(root);
+            Files.writeString(root.resolve("localmodule.lua"), "return {name='skin module'}");
+            accessor.exec("assert(require('localmodule').name == 'skin module')");
             accessor.exec("local j=require('luajava'); local f=j.newInstance('java.io.File','file.txt'); "
                     + "assert(f:isFile()); assert(not f:isDirectory()); assert(f:getName()=='file.txt'); "
                     + "assert(tostring(f)==f:getPath()); local d=j.new(j.bindClass('java.io.File'),'.'); "
@@ -59,13 +61,20 @@ public final class SkinCompatibilityApiTest {
             LuaTable preview = new LuaTable();
             new SkinFileLuaApiExporter(new SkinLuaPathResolver(() -> root), false).export(preview);
             check(!preview.get("file_delete").call(LuaValue.valueOf("file.txt")).toboolean(), "Preview must not delete");
+            check(!preview.get("file_mkdir").call(LuaValue.valueOf("new-directory")).toboolean(), "Preview must not create directories");
+            check(!preview.get("file_write").call(LuaValue.valueOf("file.txt"), LuaValue.valueOf("changed")).toboolean(),
+                    "Preview must not write");
+            check(preview.get("file_read_lines").call(LuaValue.valueOf("file.txt")).get(1).tojstring().equals("test"),
+                    "Read-only previews retain file reads");
+            check(Files.readString(root.resolve("file.txt")).equals("test"), "Preview must keep existing file contents");
             check(files.get("file_delete").call(LuaValue.valueOf("file.txt")).toboolean(), "Delete a regular file");
             check(!files.get("file_delete").call(LuaValue.valueOf("file.txt")).toboolean(), "Missing file returns false");
             check(Files.exists(outside.resolve("keep.txt")), "Outside file must remain");
             var previewAccessor = new SkinLuaAccessor(true, root);
             previewAccessor.exportMainStateAccessor(null);
             previewAccessor.exec("assert(not file_delete('file.txt')); assert(not open_url('https://example.com')); "
-                    + "assert(http_get_async('https://example.com')==nil)");
+                    + "assert(http_get_async('https://example.com')==nil); "
+                    + "assert(http_get==nil and audio_play==nil and set_volume_sys==nil and luajava==nil)");
             previewAccessor.dispose();
 
             Gdx.input = (Input) Proxy.newProxyInstance(Input.class.getClassLoader(), new Class<?>[] {Input.class}, (proxy, method, arguments) -> {
