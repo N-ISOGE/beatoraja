@@ -3,9 +3,7 @@ package bms.player.beatoraja.launcher;
 import java.io.File;
 import java.io.IOException;
 import java.net.URL;
-import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
-import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.HashMap;
 import java.util.ResourceBundle;
@@ -210,18 +208,6 @@ public class ResourceConfigurationView implements Initializable {
 		};
 
 		Runnable loadTableRunnable = () -> {
-			try (DirectoryStream<Path> paths = Files.newDirectoryStream(Paths.get(config.getTablepath()))) {
-				paths.forEach((p) -> {
-					if(p.toString().toLowerCase().endsWith(".bmt")) {
-						try {
-							Files.deleteIfExists(p);
-						} catch (IOException ignored) {
-						}
-					}
-				});
-			} catch (IOException ignored) {
-			}
-
 			TableDataAccessor tda = new TableDataAccessor(config.getTablepath());
 			tda.updateTableData(config.getTableURL());
 			refreshLocalTableInfo();
@@ -435,8 +421,9 @@ public class ResourceConfigurationView implements Initializable {
     @FXML
 	public void addTableURL() {
 		String s = url.getText();
-		if (s.startsWith("http") && !tableurl.getItems().contains(s)) {
-			tableurl.addItem(new TableInfo(url.getText()));
+		if (s != null && (s.startsWith("http://") || s.startsWith("https://"))
+				&& tableurl.getItems().stream().noneMatch(item -> s.equals(item.getUrl()))) {
+			tableurl.addItem(new TableInfo(s));
 		}
 	}
 
