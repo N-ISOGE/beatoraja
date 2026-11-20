@@ -18,7 +18,6 @@ import java.util.logging.Handler;
 import java.util.logging.Level;
 import java.util.logging.LogRecord;
 import java.util.logging.Logger;
-import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import javax.swing.JOptionPane;
@@ -26,6 +25,8 @@ import javax.swing.JOptionPane;
 import com.badlogic.gdx.ApplicationListener;
 import com.badlogic.gdx.Gdx;
 import com.badlogic.gdx.Graphics;
+import com.badlogic.gdx.utils.JsonReader;
+import com.badlogic.gdx.utils.JsonValue;
 import javafx.application.Application;
 import javafx.fxml.FXMLLoader;
 import javafx.scene.Scene;
@@ -78,40 +79,10 @@ public class MainLoader extends Application {
 			System.exit(1);
 		}
 
-		BMSPlayerMode auto = null;
-		boolean gameRequested = Arrays.asList(args).contains("--game");
-		for (String s : args) {
-			if (s.startsWith("-")) {
-				if (s.equals("-a")) {
-					auto = BMSPlayerMode.AUTOPLAY;
-				}
-				if (s.equals("-p")) {
-					auto = BMSPlayerMode.PRACTICE;
-				}
-				if (s.equals("-r") || s.equals("-r1")) {
-					auto = BMSPlayerMode.REPLAY_1;
-				}
-				if (s.equals("-r2")) {
-					auto = BMSPlayerMode.REPLAY_2;
-				}
-				if (s.equals("-r3")) {
-					auto = BMSPlayerMode.REPLAY_3;
-				}
-				if (s.equals("-r4")) {
-					auto = BMSPlayerMode.REPLAY_4;
-				}
-				if (s.equals("-s")) {
-					auto = BMSPlayerMode.PLAY;
-				}
-			} else {
-				bmsPath = Paths.get(s);
-				if(auto == null) {
-					auto = BMSPlayerMode.PLAY;
-				}
-			}
-		}
-
-
+		LaunchArgs launch = LaunchArgs.parseArgs(args);
+		bmsPath = launch.bmsPath();
+		BMSPlayerMode auto = launch.mode();
+		boolean gameRequested = launch.gameRequested();
 
 		if (gameRequested || (Files.exists(Config.configpath) && (bmsPath != null || auto != null))) {
 			if (!Boolean.getBoolean(DesktopLauncher.GAME_PROCESS)) {
@@ -127,10 +98,62 @@ public class MainLoader extends Application {
 			configureLogger();
 			IRConnectionManager.getAllAvailableIRConnectionName();
 			play(bmsPath, auto == null ? BMSPlayerMode.PLAY : auto, true, null, null,
-					bmsPath != null || Arrays.asList(args).contains("--song-updated"));
+					bmsPath != null || launch.songUpdated());
 		} else {
 			configureLogger();
 			launch(args);
+		}
+	}
+
+	record LaunchArgs(Path bmsPath, BMSPlayerMode mode, boolean gameRequested, boolean songUpdated) {
+		static LaunchArgs parseArgs(String[] args) {
+			Path parsedPath = null;
+			BMSPlayerMode auto = null;
+			boolean gameRequested = false;
+			boolean songUpdated = false;
+			boolean optionsEnded = false;
+			if (args != null) {
+				for (String s : args) {
+					if (s == null) {
+						continue;
+					}
+					if (!optionsEnded && s.equals("--")) {
+						optionsEnded = true;
+						continue;
+					}
+					if (!optionsEnded && s.startsWith("-")) {
+						if (s.equals("-a")) {
+							auto = BMSPlayerMode.AUTOPLAY;
+						} else if (s.equals("-p")) {
+							auto = BMSPlayerMode.PRACTICE;
+						} else if (s.equals("-r") || s.equals("-r1")) {
+							auto = BMSPlayerMode.REPLAY_1;
+						} else if (s.equals("-r2")) {
+							auto = BMSPlayerMode.REPLAY_2;
+						} else if (s.equals("-r3")) {
+							auto = BMSPlayerMode.REPLAY_3;
+						} else if (s.equals("-r4")) {
+							auto = BMSPlayerMode.REPLAY_4;
+						} else if (s.equals("-s")) {
+							auto = BMSPlayerMode.PLAY;
+						} else if (s.equals("--game")) {
+							gameRequested = true;
+						} else if (s.equals("--song-updated")) {
+							songUpdated = true;
+						}
+					} else {
+						try {
+							parsedPath = Paths.get(s);
+							if (auto == null) {
+								auto = BMSPlayerMode.PLAY;
+							}
+						} catch (InvalidPathException e) {
+							Logger.getGlobal().warning("Invalid BMS path argument ignored: " + e.getMessage());
+						}
+					}
+				}
+			}
+			return new LaunchArgs(parsedPath, auto, gameRequested, songUpdated);
 		}
 	}
 
@@ -532,11 +555,22 @@ public class MainLoader extends Application {
 		}
 	}
 
-	private static class GithubVersionChecker implements VersionChecker {
-		private static final Pattern RELEASE_NAME = Pattern.compile("\\\"name\\\"\\s*:\\s*\\\"((?:\\\\\\\\.|[^\\\"\\\\\\\\])*)\\\"");
+	static class GithubVersionChecker implements VersionChecker {
+		private static final String DEFAULT_RELEASE_URL = "https://api.github.com/repos/exch-bms2/beatoraja/releases/latest";
+		private static final int MAX_RELEASE_RESPONSE_BYTES = 1024 * 1024;
+		private static final Pattern SAFE_VERSION = Pattern.compile("^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$");
 
+		private final String releaseUrl;
 		private String dlurl;
 		private String message;
+
+		GithubVersionChecker() {
+			this(DEFAULT_RELEASE_URL);
+		}
+
+		GithubVersionChecker(String releaseUrl) {
+			this.releaseUrl = releaseUrl;
+		}
 
 		public String getMessage() {
 			if(message == null) {
@@ -554,7 +588,7 @@ public class MainLoader extends Application {
 
 		private void getInformation() {
 			try {
-				URL url = new URL("https://api.github.com/repos/exch-bms2/beatoraja/releases/latest");
+				URL url = new URL(releaseUrl);
 				URLConnection connection = url.openConnection();
 				connection.setConnectTimeout(5000);
 				connection.setReadTimeout(5000);
@@ -574,19 +608,47 @@ public class MainLoader extends Application {
 		}
 
 		private String getReleaseName(URLConnection connection) throws IOException {
-			StringBuilder response = new StringBuilder();
-			try (Reader reader = new InputStreamReader(connection.getInputStream(), StandardCharsets.UTF_8)) {
-				char[] buffer = new char[4096];
-				for (int length; (length = reader.read(buffer)) >= 0;) {
-					response.append(buffer, 0, length);
-				}
+			byte[] bytes;
+			try (InputStream input = connection.getInputStream()) {
+				bytes = input.readNBytes(MAX_RELEASE_RESPONSE_BYTES + 1);
 			}
+			if (bytes.length > MAX_RELEASE_RESPONSE_BYTES) {
+				throw new IOException("GitHub release response exceeds " + MAX_RELEASE_RESPONSE_BYTES + " bytes");
+			}
+			return parseReleaseName(new String(bytes, StandardCharsets.UTF_8));
+		}
 
-			Matcher matcher = RELEASE_NAME.matcher(response);
-			if (!matcher.find()) {
-				throw new IOException("GitHub release response does not contain a name");
+		static String parseReleaseName(String body) throws IOException {
+			JsonValue root;
+			try {
+				root = new JsonReader().parse(body);
+			} catch (RuntimeException e) {
+				throw new IOException("Malformed GitHub release JSON", e);
 			}
-			return matcher.group(1).replace("\\\\\"", "\"").replace("\\\\\\\\", "\\");
+			if (root == null || !root.isObject()) {
+				throw new IOException("GitHub release response is not a JSON object");
+			}
+			String candidate = rootString(root, "name");
+			if (candidate == null || candidate.isBlank()) {
+				candidate = rootString(root, "tag_name");
+			}
+			if (candidate == null) {
+				throw new IOException("GitHub release response does not contain a name or tag_name");
+			}
+			String trimmed = candidate.trim();
+			if (!isSafeVersion(trimmed)) {
+				throw new IOException("GitHub release version failed validation");
+			}
+			return trimmed;
+		}
+
+		private static String rootString(JsonValue root, String key) {
+			JsonValue value = root.get(key);
+			return value != null && value.isString() ? value.asString() : null;
+		}
+
+		static boolean isSafeVersion(String version) {
+			return version != null && !version.contains("..") && SAFE_VERSION.matcher(version).matches();
 		}
 	}
 
