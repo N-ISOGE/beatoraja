@@ -90,7 +90,9 @@ public final class DiscordWebhook {
         Config config = state.resource.getConfig();
         int mode = config.getWebhookOption();
         if (mode != IMAGE && mode != SCORE_CARD) return null;
-        List<URI> destinations = Arrays.stream(config.getWebhookUrl())
+        String[] urls = config.getWebhookUrl();
+        if (urls == null) return null;
+        List<URI> destinations = Arrays.stream(urls)
                 .limit(MAX_DESTINATIONS).map(DiscordWebhook::normalizeUrl).filter(Objects::nonNull)
                 .distinct().map(URI::create).toList();
         if (destinations.isEmpty()) return null;
@@ -102,8 +104,8 @@ public final class DiscordWebhook {
     private static JsonValue scoreCard(AbstractResult result) {
         ScoreData score = result.getNewScore();
         if (score == null) return null;
-        String title = (StringPropertyFactory.getStringProperty(STRING_TABLE_LEVEL).get(result) + " "
-                + StringPropertyFactory.getStringProperty(STRING_FULLTITLE).get(result)).strip();
+        String title = (Objects.toString(StringPropertyFactory.getStringProperty(STRING_TABLE_LEVEL).get(result), "") + " "
+                + Objects.toString(StringPropertyFactory.getStringProperty(STRING_FULLTITLE).get(result), "")).strip();
         int end = title.offsetByCodePoints(0, Math.min(256, title.codePointCount(0, title.length())));
         return scoreCard(title.isEmpty() ? "beatoraja" : title.substring(0, end),
                 scoreDescription(score, result.getOldScore(),

@@ -29,7 +29,7 @@ public final class IRWorkerMain {
 
 		Json json = IsolatedIRConnection.createJson();
 		try {
-			BufferedReader reader = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8));
+			BufferedInputStream reader = new BufferedInputStream(System.in);
 			BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(FileDescriptor.out),
 					StandardCharsets.UTF_8));
 			// IR実装がSystem.outへログを出してもJSON応答ストリームを壊さないようにする。
@@ -54,9 +54,25 @@ public final class IRWorkerMain {
 				return;
 			}
 
-			String line;
-			while((line = reader.readLine()) != null) {
-				write(writer, json, handle(connection, json.fromJson(Request.class, line)));
+			while(true) {
+				String line;
+				try {
+					line = readLine(reader, MAX_LINE_BYTES);
+				} catch(IOException e) {
+					write(writer, json, Response.error("IR worker request error : " + e.getMessage()));
+					break;
+				}
+				if(line == null) {
+					break;
+				}
+				Request request;
+				try {
+					request = json.fromJson(Request.class, line);
+				} catch(RuntimeException e) {
+					write(writer, json, Response.error("Malformed IR worker request : " + e.getMessage()));
+					continue;
+				}
+				write(writer, json, handle(connection, request));
 			}
 		} catch(Throwable e) {
 			e.printStackTrace(System.err);
@@ -68,9 +84,16 @@ public final class IRWorkerMain {
 	 */
 	private static Response handle(IRConnection connection, Request request) {
 		try {
+			if (request == null || request.method == null) {
+				return Response.error("Missing IR worker request");
+			}
 			return switch(request.method) {
-				case METHOD_REGISTER -> playerResponse(connection.register(request.account.toIRAccount()));
-				case METHOD_LOGIN -> playerResponse(connection.login(request.account.toIRAccount()));
+				case METHOD_REGISTER -> request.account == null
+						? Response.error("Missing IR account")
+						: playerResponse(connection.register(request.account.toIRAccount()));
+				case METHOD_LOGIN -> request.account == null
+						? Response.error("Missing IR account")
+						: playerResponse(connection.login(request.account.toIRAccount()));
 				case METHOD_GET_RIVALS -> playersResponse(connection.getRivals());
 				case METHOD_GET_TABLE_DATAS -> tablesResponse(connection.getTableDatas());
 				case METHOD_GET_PLAY_DATA -> request.chart != null
@@ -86,7 +109,9 @@ public final class IRWorkerMain {
 				case METHOD_SEND_PLAY_DATA -> objectResponse(connection.sendPlayData(
 						request.chart != null ? request.chart.toIRChartData() : null,
 						request.score != null ? request.score.toIRScoreData() : null));
-				case METHOD_SET_REVIEW -> reviewResponse(connection.setReview(request.review.toIRReview()));
+				case METHOD_SET_REVIEW -> request.review == null
+						? Response.error("Missing review update")
+						: reviewResponse(connection.setReview(request.review.toIRReview()));
 				case METHOD_SEND_COURSE_PLAY_DATA -> objectResponse(connection.sendCoursePlayData(
 						request.course != null ? request.course.toIRCourseData() : null,
 						request.score != null ? request.score.toIRScoreData() : null));
@@ -106,30 +131,45 @@ public final class IRWorkerMain {
 	}
 
 	private static Response playerResponse(IRResponse<IRPlayerData> irResponse) {
+		if (irResponse == null) {
+			return base(null);
+		}
 		Response response = base(irResponse);
 		response.player = Player.from(irResponse.getData());
 		return response;
 	}
 
 	private static Response playersResponse(IRResponse<IRPlayerData[]> irResponse) {
+		if (irResponse == null) {
+			return base(null);
+		}
 		Response response = base(irResponse);
 		response.players = fromPlayers(irResponse.getData());
 		return response;
 	}
 
 	private static Response tablesResponse(IRResponse<IRTableData[]> irResponse) {
+		if (irResponse == null) {
+			return base(null);
+		}
 		Response response = base(irResponse);
 		response.tables = fromTables(irResponse.getData());
 		return response;
 	}
 
 	private static Response scoresResponse(IRResponse<IRScoreData[]> irResponse) {
+		if (irResponse == null) {
+			return base(null);
+		}
 		Response response = base(irResponse);
 		response.scores = fromScores(irResponse.getData());
 		return response;
 	}
 
 	private static Response scoresResponse(IRScoreDataSyncResponse irResponse) {
+		if (irResponse == null) {
+			return base(null);
+		}
 		Response response = scoresResponse((IRResponse<IRScoreData[]>) irResponse);
 		response.scoreRevision = irResponse.getScoreRevision();
 		response.hasMore = irResponse.hasMore();
@@ -155,12 +195,18 @@ public final class IRWorkerMain {
 	}
 
 	private static Response versionResponse(IRResponse<IRVersionInfo> irResponse) {
+		if (irResponse == null) {
+			return base(null);
+		}
 		Response response = base(irResponse);
 		response.version = Version.from(irResponse.getData());
 		return response;
 	}
 
 	private static Response illegalSongsResponse(IRResponse<String[]> irResponse) {
+		if (irResponse == null) {
+			return base(null);
+		}
 		Response response = base(irResponse);
 		response.illegalSongs = irResponse.getData();
 		return response;
