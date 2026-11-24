@@ -1,16 +1,15 @@
 package bms.player.beatoraja.skin.lr2;
 
-import java.io.BufferedReader;
+import java.util.Set;
+import java.util.HashSet;
+import bms.player.beatoraja.skin.SkinPathPolicy;
+import bms.player.beatoraja.skin.SkinTextReader;
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.IOException;
-import java.io.InputStreamReader;
 import java.nio.charset.Charset;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.function.BiConsumer;
 import java.util.logging.Logger;
-import java.util.stream.Stream;
 
 import static bms.player.beatoraja.skin.SkinProperty.*;
 
@@ -19,16 +18,13 @@ import bms.player.beatoraja.*;
 import bms.player.beatoraja.config.SkinPreview;
 import bms.player.beatoraja.play.PlaySkin;
 import bms.player.beatoraja.play.SkinGauge;
-import bms.player.beatoraja.play.bga.BGAProcessor;
 import bms.player.beatoraja.skin.*;
 import bms.player.beatoraja.skin.SkinHeader.*;
-import bms.player.beatoraja.skin.json.JsonSkin;
 import bms.player.beatoraja.skin.property.StringPropertyFactory;
 import bms.player.beatoraja.video.VideoFormat;
 
 import com.badlogic.gdx.graphics.Texture;
 import com.badlogic.gdx.graphics.g2d.TextureRegion;
-import com.badlogic.gdx.math.Rectangle;
 import com.badlogic.gdx.utils.Array;
 import com.badlogic.gdx.utils.IntArray;
 import com.badlogic.gdx.utils.IntIntMap;
@@ -79,17 +75,7 @@ public abstract class LR2SkinCSVLoader<S extends Skin> extends LR2SkinLoader {
 		addCommandWord(new CommandWord("INCLUDE") {
 			@Override
 			public void execute(String[] str) {
-				final File imagefile = LR2SkinLoader.getPath(skinpath, str[1], filemap);
-				if (imagefile.exists()) {
-					try (BufferedReader br = new BufferedReader(
-							new InputStreamReader(new FileInputStream(imagefile), MS932))) {
-						while ((line = br.readLine()) != null) {
-							processLine(line, state);
-						}
-					} catch (IOException e) {
-						e.printStackTrace();
-					}
-				}
+				if (str.length > 1) readInclude(str[1]);
 			}
 		});
 
@@ -100,7 +86,7 @@ public abstract class LR2SkinCSVLoader<S extends Skin> extends LR2SkinLoader {
 				if (imagefile.exists()) {
 					boolean isMovie = false;
 					for (String mov : VideoFormat.getAllExtensions()) {
-						if (imagefile.getName().toLowerCase().endsWith(mov)) {
+						if (imagefile.getName().toLowerCase(java.util.Locale.ROOT).endsWith("." + mov)) {
 							try {
 								SkinSourceMovie mm = new SkinSourceMovie(imagefile.getPath());
 								imagelist.add(mm);
@@ -170,7 +156,7 @@ public abstract class LR2SkinCSVLoader<S extends Skin> extends LR2SkinLoader {
 					// + gr);
 				} else {
 					int[] values = parseInt(str);
-					if (values[2] < imagelist.size && imagelist.get(values[2]) instanceof SkinSourceMovie movie) {
+					if (values[2] >= 0 && values[2] < imagelist.size && imagelist.get(values[2]) instanceof SkinSourceMovie movie) {
 						part = new SkinImage(movie);
 					} else {
 						TextureRegion[] images = getSourceImage(values);
@@ -761,7 +747,8 @@ public abstract class LR2SkinCSVLoader<S extends Skin> extends LR2SkinLoader {
 	SkinSlider slider = null;
 	SkinNumber num = null;
 	SkinText text = null;
-	String line = null;
+	private final Set<Path> activeIncludes = new HashSet<>();
+	private static final int MAX_INCLUDE_DEPTH = 16;
 	SkinImage PMcharaPart = null;
 
 	SkinGauge gauger = null;
@@ -773,16 +760,43 @@ public abstract class LR2SkinCSVLoader<S extends Skin> extends LR2SkinLoader {
 
 	int stretch = -1;
 
+	private void readInclude(String name) {
+		boolean parentSkip = skip;
+		boolean parentIfs = ifs;
+		try {
+			Path root = Path.of(skinpath);
+			boolean allowLinks = bms.player.beatoraja.skin.SkinLoader.previewSkinRoot() == null;
+			Path include = SkinPathPolicy.requireInside(root, getPath(skinpath, name, filemap).toPath(), allowLinks);
+			if (activeIncludes.size() > MAX_INCLUDE_DEPTH || !activeIncludes.add(include)) return;
+			try (var reader = SkinTextReader.open(include)) {
+				skip = false;
+				ifs = false;
+				String childLine;
+				while ((childLine = reader.readLine()) != null) processLine(childLine, state);
+			} finally {
+				activeIncludes.remove(include);
+			}
+		} catch (IOException | RuntimeException e) {
+			java.util.logging.Logger.getGlobal().warning("Skipping unreadable LR2 skin include");
+		} finally {
+			skip = parentSkip;
+			ifs = parentIfs;
+		}
+	}
+
 	protected void loadSkin0(Skin skin, Path f, MainState state, IntIntMap option) throws IOException {
 
-		try (Stream<String> lines = Files.lines(f, MS932)) {
-			lines.forEach(line -> {
+		activeIncludes.clear();
+		activeIncludes.add(f.toAbsolutePath().normalize());
+		try (var reader = SkinTextReader.open(f)) {
+			String line;
+			while ((line = reader.readLine()) != null) {
 				try {
 					processLine(line, state);
 				} catch (Throwable e) {
 					e.printStackTrace();
 				}
-			});
+			}
 		} catch (IOException | RuntimeException | Error e) {
 			try {
 				skin.dispose();
@@ -836,7 +850,7 @@ public abstract class LR2SkinCSVLoader<S extends Skin> extends LR2SkinLoader {
 		if (values[2] < imagelist.size && imagelist.get(values[2]) instanceof Texture texture) {
 			return getSourceImage(texture, values[3], values[4], values[5], values[6], values[7], values[8]);
 		}
-		Logger.getGlobal().warning("IMAGEが定義されてないか、読み込みに失敗しています : " + line);
+		Logger.getGlobal().warning("IMAGEが定義されてないか、読み込みに失敗しています : " + values[2]);
 		return null;
 	}
 

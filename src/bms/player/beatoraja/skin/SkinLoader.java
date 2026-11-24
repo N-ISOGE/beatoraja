@@ -1,5 +1,6 @@
 package bms.player.beatoraja.skin;
 
+import bms.player.beatoraja.skin.lua.SkinLuaAccessor;
 import bms.player.beatoraja.*;
 import bms.player.beatoraja.skin.json.JSONSkinLoader;
 import bms.player.beatoraja.skin.lr2.LR2SkinCSVLoader;
@@ -27,6 +28,7 @@ public abstract class SkinLoader {
      */
     private static PixmapResourcePool resource;
     private static final ThreadLocal<PixmapResourcePool> previewResources = new ThreadLocal<>();
+    private static final ThreadLocal<Path> previewSkinRoot = new ThreadLocal<>();
 
     public static void initPixmapResourcePool(int gen) {
     	if(resource != null) {
@@ -98,7 +100,7 @@ public abstract class SkinLoader {
     }
 
     public static Skin load(MainState state, SkinType skinType, SkinConfig sc) {
-        return load(state, skinType, sc, true);
+        return load(state, skinType, sc, true, null);
     }
 
     public static Skin loadPracticePreview(MainState state, SkinType skinType, SkinConfig sc) {
@@ -106,7 +108,7 @@ public abstract class SkinLoader {
         var temporary = new PixmapResourcePool();
         previewResources.set(temporary);
         try {
-            return load(state, skinType, sc, false);
+            return load(state, skinType, sc, false, null);
         } finally {
             if (previous == null) previewResources.remove();
             else previewResources.set(previous);
@@ -114,7 +116,26 @@ public abstract class SkinLoader {
         }
     }
 
-    private static Skin load(MainState state, SkinType skinType, SkinConfig sc, boolean ageCache) {
+    public static Skin loadConfigurationPreview(MainState state, SkinType type, SkinConfig skinConfig, boolean restrictEffects) {
+        Config config = state.resource.getConfig();
+        if (!restrictEffects) return load(state, type, skinConfig);
+        if (skinConfig == null || !skinConfig.validate()) return null;
+        Path previous = previewSkinRoot.get();
+        try {
+            Path root = Path.of(config.getSkinpath()).toAbsolutePath().normalize();
+            Path entry = SkinPathPolicy.requireInside(root, Path.of(skinConfig.getPath()));
+            Path assetRoot = entry.toString().endsWith(".lr2skin") ? root : entry.getParent();
+            previewSkinRoot.set(assetRoot);
+            return load(state, type, skinConfig, false, entry.getParent());
+        } catch (java.io.IOException | InvalidPathException e) {
+            return null;
+        } finally {
+            if (previous == null) previewSkinRoot.remove();
+            else previewSkinRoot.set(previous);
+        }
+    }
+
+    private static Skin load(MainState state, SkinType skinType, SkinConfig sc, boolean ageCache, Path sandboxRoot) {
         final PlayerResource resource = state.resource;
         if (sc == null || !sc.validate()) {
             return null;
@@ -122,10 +143,12 @@ public abstract class SkinLoader {
         try {
             Skin skin;
             if (sc.getPath().endsWith(".json")) {
-                JSONSkinLoader sl = new JSONSkinLoader(state, resource.getConfig());
+                JSONSkinLoader sl = sandboxRoot == null ? new JSONSkinLoader(state, resource.getConfig())
+                        : new JSONSkinLoader(state, resource.getConfig(), new SkinLuaAccessor(true, sandboxRoot));
                 skin = sl.loadSkin(Paths.get(sc.getPath()), skinType, sc.getProperties());
             } else if (sc.getPath().endsWith(".luaskin")) {
-                LuaSkinLoader loader = new LuaSkinLoader(state, resource.getConfig());
+                LuaSkinLoader loader = sandboxRoot == null ? new LuaSkinLoader(state, resource.getConfig())
+                        : new LuaSkinLoader(state, resource.getConfig(), sandboxRoot);
                 skin = loader.loadSkin(Paths.get(sc.getPath()), skinType, sc.getProperties());
             } else {
                 LR2SkinHeaderLoader loader = new LR2SkinHeaderLoader(resource.getConfig());
@@ -162,11 +185,13 @@ public abstract class SkinLoader {
     }
 
     public static File getPath(String imagepath, ObjectMap<String, String> filemap) {
+        imagepath = imagepath.replace('\\', '/');
         File imagefile = new File(imagepath);
-        for (String key : filemap.keys()) {
-            if (imagepath.startsWith(key)) {
+        for (String storedKey : filemap.keys()) {
+            String key = storedKey.replace('\\', '/');
+            if (imagepath.regionMatches(true, 0, key, 0, key.length())) {
                 String foot = imagepath.substring(key.length());
-                String filename = filemap.get(key);
+                String filename = filemap.get(storedKey);
                 int wildcard = key.lastIndexOf('*');
                 int basename = key.lastIndexOf('/', wildcard < 0 ? key.length() - 1 : wildcard) + 1;
                 // The UI stores full filenames; retain the old prefix for legacy suffix-only values.
@@ -179,28 +204,28 @@ public abstract class SkinLoader {
             }
         }
         if (imagepath.contains("*")) {
-            String ext = imagepath.substring(imagepath.lastIndexOf("*") + 1);
-            if(imagepath.contains("|")) {
-                if(imagepath.length() > imagepath.lastIndexOf('|') + 1) {
-                    ext = imagepath.substring(imagepath.lastIndexOf("*") + 1, imagepath.indexOf('|')) + imagepath.substring(imagepath.lastIndexOf('|') + 1);
-                } else {
-                    ext = imagepath.substring(imagepath.lastIndexOf("*") + 1, imagepath.indexOf('|'));
-                }
-            }
-            File imagedir = new File(imagepath.substring(0, imagepath.lastIndexOf('/')));
-            if (imagedir.exists() && imagedir.isDirectory()) {
-                Array<File> l = new Array<File>();
-                for (File subfile : imagedir.listFiles()) {
-                    if (subfile.getPath().toLowerCase().endsWith(ext)) {
-                        l.add(subfile);
-                    }
-                }
-                if (l.size > 0) {
-                    imagefile = l.get((int) (Math.random() * l.size));
-                }
+            var choices = SkinCustomization.fileChoices(imagepath);
+            if (!choices.isEmpty()) {
+                String name = choices.get(java.util.concurrent.ThreadLocalRandom.current().nextInt(choices.size()));
+                imagefile = new File(imagepath.substring(0, imagepath.lastIndexOf('/') + 1) + name);
             }
         }
+        if (previewSkinRoot.get() != null && !imagefile.getPath().contains("*")) requirePreviewPath(imagefile.toPath());
         return imagefile;
+    }
+
+    public static Path previewSkinRoot() {
+        return previewSkinRoot.get();
+    }
+
+    protected static void requirePreviewPath(Path path) {
+        Path root = previewSkinRoot.get();
+        if (root == null) return;
+        try {
+            SkinPathPolicy.requireInside(root, path);
+        } catch (java.io.IOException e) {
+            throw new IllegalArgumentException("Skin preview resource outside the allowed root", e);
+        }
     }
 
     public static Texture getTexture(String path, boolean usecim) {
@@ -210,27 +235,38 @@ public abstract class SkinLoader {
     public static Texture getTexture(String path, boolean usecim, boolean useMipMaps) {
         final PixmapResourcePool temporary = previewResources.get();
         final PixmapResourcePool resource = temporary == null ? SkinLoader.getResource() : temporary;
-        if(resource.exists(path)) {
-            return new Texture(resource.getPixmap(path), useMipMaps);
-        }
         try {
-            boolean usePixmapCache = temporary == null && usecim && !path.toLowerCase(Locale.ROOT).endsWith(".webp");
+            if (previewSkinRoot.get() != null) requirePreviewPath(Path.of(path));
+            if (resource.exists(path)) {
+                Pixmap cached = resource.getPixmap(path);
+                return cached == null ? null : new Texture(cached, useMipMaps);
+            }
+            int extension = path.lastIndexOf('.');
+            boolean usePixmapCache = previewSkinRoot.get() == null && temporary == null && usecim
+                    && extension > Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'))
+                    && !path.toLowerCase(Locale.ROOT).endsWith(".webp");
+            if (!usePixmapCache) {
+                Pixmap pixmap = resource.getPixmap(path);
+                return pixmap == null ? null : new Texture(pixmap, useMipMaps);
+            }
             long modifiedtime = Files.getLastModifiedTime(Paths.get(path)).toMillis() / 1000;
-            String cim = path.substring(0, path.lastIndexOf('.')) + "__" + modifiedtime + ".cim";
+            String cim = path.substring(0, extension) + "__" + modifiedtime + ".cim";
             if(usePixmapCache && resource.exists(cim)) {
-                return new Texture(resource.getPixmap(cim), useMipMaps);
+                Pixmap pixmap = resource.getPixmap(cim);
+                return pixmap == null ? null : new Texture(pixmap, useMipMaps);
             }
 
             if (usePixmapCache && Files.exists(Paths.get(cim))) {
                 Pixmap pixmap = resource.getPixmap(cim);
-                return new Texture(pixmap, useMipMaps);
-            } else if(usePixmapCache){
+                return pixmap == null ? null : new Texture(pixmap, useMipMaps);
+            } else {
                 Pixmap pixmap = resource.getPixmap(path);
+                if (pixmap == null) return null;
 
                 try (DirectoryStream<Path> paths = Files.newDirectoryStream(Paths.get(path).getParent())) {
                     for (Path p : paths) {
                         final String filename = p.toString();
-                        if(filename.startsWith(path.substring(0, path.lastIndexOf('.')) + "__") && filename.endsWith(".cim")) {
+                        if(filename.startsWith(path.substring(0, extension) + "__") && filename.endsWith(".cim")) {
                             Files.deleteIfExists(p);
                             break;
                         }
@@ -242,9 +278,6 @@ public abstract class SkinLoader {
 
                 Texture tex = new Texture(pixmap, useMipMaps);
                 return tex;
-            } else {
-                Pixmap pixmap = resource.getPixmap(path);
-                return new Texture(pixmap, useMipMaps);
             }
         } catch (Throwable e) {
             e.printStackTrace();

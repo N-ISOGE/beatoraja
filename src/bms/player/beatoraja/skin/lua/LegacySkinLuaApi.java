@@ -1,10 +1,11 @@
 package bms.player.beatoraja.skin.lua;
 
+import bms.player.beatoraja.skin.SkinPathPolicy;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.Set;
 import java.io.BufferedReader;
 import java.io.IOException;
-import java.net.HttpURLConnection;
-import java.net.URI;
-import java.net.URL;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -35,14 +36,14 @@ import com.badlogic.gdx.utils.Array;
  */
 final class LegacySkinLuaApi {
 
-	private LegacySkinLuaApi() {
-	}
+	private final Set<LegacyHttpConnection> active = ConcurrentHashMap.newKeySet();
+	private boolean disposed;
 
 	private static final String CLASS_NAME = "__legacy_class";
 	private static final int HTTP_DEFAULT_TIMEOUT_MS = 1000;
 	private static final int HTTP_MAX_TIMEOUT_MS = 5000;
 
-	static void install(Globals globals, Supplier<Path> skinDirectorySupplier) {
+	void install(Globals globals, Supplier<Path> skinDirectorySupplier) {
 		SkinLuaPathResolver pathResolver = new SkinLuaPathResolver(skinDirectorySupplier);
 		LuaTable luajava = new LuaTable();
 		luajava.set("bindClass", new BindClassFunction());
@@ -97,7 +98,7 @@ final class LegacySkinLuaApi {
 		}
 	}
 
-	private static final class NewInstanceFunction extends VarArgFunction {
+	private final class NewInstanceFunction extends VarArgFunction {
 		private final SkinLuaPathResolver pathResolver;
 
 		private NewInstanceFunction(SkinLuaPathResolver pathResolver) {
@@ -157,9 +158,15 @@ final class LegacySkinLuaApi {
 				LuaTable files = new LuaTable();
 				try (DirectoryStream<Path> stream = Files.newDirectoryStream(pathResolver.resolve(path.toString()))) {
 					int index = 1;
+					int visited = 0;
 					for (Path file : stream) {
-						if (index > 4096) throw new IOException("Too many skin directory entries");
-						if (!Files.isSymbolicLink(file)) files.set(index++, fileFacade(pathResolver, file.toString()));
+						if (++visited > 4096) throw new IOException("Too many skin directory entries");
+						try {
+							SkinPathPolicy.requireInside(path, file);
+						} catch (IOException e) {
+							continue;
+						}
+						files.set(index++, fileFacade(pathResolver, file.toString()));
 					}
 				} catch (IOException | RuntimeException e) {
 					return LuaValue.NIL;
@@ -170,7 +177,7 @@ final class LegacySkinLuaApi {
 		return facade;
 	}
 
-	private static LuaTable urlFacade(String urlText) {
+	private LuaTable urlFacade(String urlText) {
 		LegacyHttpConnection connection = new LegacyHttpConnection(urlText);
 		LuaTable facade = new LuaTable();
 		facade.set("openConnection", new OneArgFunction() {
@@ -260,67 +267,76 @@ final class LegacySkinLuaApi {
 		return facade;
 	}
 
-	private static final class LegacyHttpConnection {
+	void dispose() {
+		disposed = true;
+		for (LegacyHttpConnection connection : active) connection.close();
+	}
+
+	private final class LegacyHttpConnection {
 		private final String urlText;
-		private String method = "GET";
 		private int timeout = HTTP_DEFAULT_TIMEOUT_MS;
 		private int maxBytes = SkinHttpBody.DEFAULT_MAX_BYTES;
-		private HttpURLConnection connection;
+		private int status;
+		private SkinAsyncHttp.OpenResponse response;
+		private ScheduledFuture<?> expiry;
 
 		private LegacyHttpConnection(String urlText) {
 			this.urlText = urlText;
 		}
 
 		private void setRequestMethod(String method) {
-			if (!"GET".equals(method)) {
-				throw new LuaError("Legacy Lua skin HTTP method denied: " + method);
-			}
-			this.method = method;
+			if (!"GET".equals(method)) throw new LuaError("Legacy Lua skin HTTP method denied");
 		}
 
 		private void setTimeout(int timeout) {
 			this.timeout = Math.max(1, Math.min(timeout, HTTP_MAX_TIMEOUT_MS));
 		}
 
-		private void connect() {
-			if (connection != null) {
-				return;
+		private synchronized void connect() {
+			if (status != 0) return;
+			if (disposed || active.size() >= SkinAsyncHttp.MAX_REQUESTS) {
+				throw new LuaError("Legacy Lua skin HTTP connection unavailable");
 			}
 			try {
-				URI uri = URI.create(urlText);
-				String scheme = uri.getScheme();
-				if (!"http".equalsIgnoreCase(scheme) && !"https".equalsIgnoreCase(scheme)) {
-					throw new IOException("unsupported scheme: " + scheme);
-				}
-				URL url = uri.toURL();
-				connection = (HttpURLConnection) url.openConnection();
-				connection.setRequestMethod(method);
-				connection.setConnectTimeout(timeout);
-				connection.setReadTimeout(timeout);
-				connection.connect();
+				response = SkinAsyncHttp.openResponse(urlText, timeout);
+				status = response.status();
+				active.add(this);
+				expiry = SkinAsyncHttp.closeOnDeadline(response, this::close);
 			} catch (IOException | RuntimeException e) {
+				close();
 				throw new LuaError("Legacy Lua skin HTTP connection failed: " + e.getMessage());
 			}
 		}
 
 		private int getResponseCode() {
 			connect();
-			try {
-				return connection.getResponseCode();
-			} catch (IOException e) {
-				throw new LuaError("Legacy Lua skin HTTP response failed: " + e.getMessage());
-			}
+			return status;
 		}
 
 		private byte[] readBody() {
 			connect();
 			try {
-				return SkinHttpBody.read(connection, maxBytes);
+				SkinAsyncHttp.OpenResponse opened;
+				synchronized (this) { opened = response; }
+				if (opened == null) throw new IOException("HTTP response closed");
+				return opened.readBody(maxBytes);
 			} catch (IOException e) {
 				throw new LuaError("Legacy Lua skin HTTP read failed: " + e.getMessage());
 			} finally {
-				connection.disconnect();
+				close();
 			}
+		}
+
+		private void close() {
+			SkinAsyncHttp.OpenResponse opened;
+			synchronized (this) {
+				opened = response;
+				response = null;
+				if (expiry != null) expiry.cancel(false);
+				expiry = null;
+				active.remove(this);
+			}
+			if (opened != null) opened.close();
 		}
 	}
 

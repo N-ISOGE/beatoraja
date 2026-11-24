@@ -883,6 +883,7 @@ public final class SkinTextBitmap extends SkinText {
 		public static final int TYPE_DISTANCE_FIELD = 1;
 		public static final int TYPE_COLORED_DISTANCE_FIELD = 2;
 
+		private final Path previewRoot = SkinLoader.previewSkinRoot();
 		private boolean usecim;
 		private boolean useMipMaps;
 		private Path fontPath;
@@ -901,6 +902,8 @@ public final class SkinTextBitmap extends SkinText {
 		/** RGBA で描くべき(SDF でない)代替ページ。 / Fallback pages that must be drawn as RGBA (not SDF). */
 		private final Set<Integer> activeFallbackPages = new HashSet<>();
 		private final Set<FallbackFont> acquiredFallbackFonts = new HashSet<>();
+		private final Map<FallbackFont, CacheableBitmapFont> previewFallbackFonts = new HashMap<>();
+		private CacheableBitmapFont previewPrimaryFont;
 		private boolean primaryFontAcquired;
 		private boolean disposed;
 
@@ -928,7 +931,7 @@ public final class SkinTextBitmap extends SkinText {
 		}
 
 		public SkinTextBitmapSource(Path fontPath, FallbackFont[] fallbackFonts, boolean usecim, boolean useMipMaps) {
-			this.usecim = usecim;
+			this.usecim = usecim && previewRoot == null;
 			this.useMipMaps = useMipMaps;
 			this.fontPath = fontPath;
 			this.fallbackFonts = fallbackFonts != null ? fallbackFonts : new FallbackFont[0];
@@ -946,7 +949,7 @@ public final class SkinTextBitmap extends SkinText {
 		}
 
 		public CacheableBitmapFont createCacheableFont(Path fontPath, int type) {
-			return BitmapFontLoader.load(fontPath, type, usecim, useMipMaps);
+			return BitmapFontLoader.load(fontPath, type, usecim, useMipMaps, previewRoot);
 		}
 
 		/**
@@ -996,6 +999,19 @@ public final class SkinTextBitmap extends SkinText {
 		}
 
 		private CacheableBitmapFont getPrimaryCacheableFont() {
+			if (previewRoot != null) {
+				if (previewPrimaryFont != null) {
+					if (previewPrimaryFont.font != null) {
+						previewPrimaryFont.font.dispose();
+					}
+					previewPrimaryFont = null;
+				}
+				previewPrimaryFont = createCacheableFont(fontPath, type);
+				if (previewPrimaryFont != null && previewPrimaryFont.font != null) {
+					previewPrimaryFont.font.setOwnsTexture(true);
+				}
+				return previewPrimaryFont;
+			}
 			if (!primaryFontAcquired) {
 				primaryFontAcquired = true;
 				return BitmapFontCache.acquire(fontPath, type, () -> createCacheableFont(fontPath, type));
@@ -1029,6 +1045,18 @@ public final class SkinTextBitmap extends SkinText {
 		}
 
 		private CacheableBitmapFont getFallbackCacheableFont(FallbackFont fallback) {
+			if (previewRoot != null) {
+				CacheableBitmapFont existing = previewFallbackFonts.get(fallback);
+				if (existing != null) {
+					return existing;
+				}
+				CacheableBitmapFont loaded = createCacheableFont(fallback.path, fallback.type);
+				if (loaded != null && loaded.font != null) {
+					loaded.font.setOwnsTexture(true);
+				}
+				previewFallbackFonts.put(fallback, loaded);
+				return loaded;
+			}
 			if (acquiredFallbackFonts.add(fallback)) {
 				return BitmapFontCache.acquire(fallback.path, fallback.type,
 						() -> createCacheableFont(fallback.path, fallback.type));
@@ -1100,7 +1128,9 @@ public final class SkinTextBitmap extends SkinText {
 				if (fallback == null || fallback.path == null) {
 					continue;
 				}
-				CacheableBitmapFont fallbackFont = BitmapFontCache.Get(fallback.path, fallback.type);
+				CacheableBitmapFont fallbackFont = previewRoot != null
+						? previewFallbackFonts.get(fallback)
+						: BitmapFontCache.Get(fallback.path, fallback.type);
 				Integer pageOffset = fallbackPageOffsets.get(fallback);
 				if (fallbackFont == null || fallbackFont.fontData == null || fallbackFont.regions == null || pageOffset == null) {
 					continue;
@@ -1196,6 +1226,18 @@ public final class SkinTextBitmap extends SkinText {
 				BitmapFontCache.release(fallback.path, fallback.type);
 			}
 			acquiredFallbackFonts.clear();
+			if (previewPrimaryFont != null) {
+				if (previewPrimaryFont.font != null) {
+					previewPrimaryFont.font.dispose();
+				}
+				previewPrimaryFont = null;
+			}
+			for (CacheableBitmapFont previewFallback : previewFallbackFonts.values()) {
+				if (previewFallback != null && previewFallback.font != null) {
+					previewFallback.font.dispose();
+				}
+			}
+			previewFallbackFonts.clear();
 		}
 
 		public static final class FallbackFont {

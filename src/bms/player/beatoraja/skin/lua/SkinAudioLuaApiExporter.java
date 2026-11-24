@@ -20,6 +20,7 @@ final class SkinAudioLuaApiExporter implements LuaApiExporter {
 		table.set("audio_play", new TwoArgFunction() {
 			@Override
 			public LuaValue call(LuaValue path, LuaValue volume) {
+				if (state == null || state.main == null || state.main.getAudioProcessor() == null) return LuaBoolean.FALSE;
 				play(path.tojstring(), volume, false);
 				return LuaBoolean.TRUE;
 			}
@@ -27,6 +28,7 @@ final class SkinAudioLuaApiExporter implements LuaApiExporter {
 		table.set("audio_loop", new TwoArgFunction() {
 			@Override
 			public LuaValue call(LuaValue path, LuaValue volume) {
+				if (state == null || state.main == null || state.main.getAudioProcessor() == null) return LuaBoolean.FALSE;
 				play(path.tojstring(), volume, true);
 				return LuaBoolean.TRUE;
 			}
@@ -34,6 +36,7 @@ final class SkinAudioLuaApiExporter implements LuaApiExporter {
 		table.set("audio_preload", new OneArgFunction() {
 			@Override
 			public LuaValue call(LuaValue path) {
+				if (state == null || state.main == null || state.main.getAudioProcessor() == null) return LuaBoolean.FALSE;
 				state.main.getAudioProcessor().play(resolve(path), 0f, false);
 				return LuaBoolean.TRUE;
 			}
@@ -41,6 +44,7 @@ final class SkinAudioLuaApiExporter implements LuaApiExporter {
 		table.set("audio_stop", new OneArgFunction() {
 			@Override
 			public LuaValue call(LuaValue path) {
+				if (state == null || state.main == null || state.main.getAudioProcessor() == null) return LuaBoolean.FALSE;
 				state.main.getAudioProcessor().stop(resolve(path));
 				return LuaBoolean.TRUE;
 			}
@@ -48,6 +52,7 @@ final class SkinAudioLuaApiExporter implements LuaApiExporter {
 		table.set("audio_dispose", new OneArgFunction() {
 			@Override
 			public LuaValue call(LuaValue path) {
+				if (state == null || state.main == null || state.main.getAudioProcessor() == null) return LuaBoolean.FALSE;
 				state.main.getAudioProcessor().dispose(resolve(path));
 				return LuaBoolean.TRUE;
 			}

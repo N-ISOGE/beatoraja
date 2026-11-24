@@ -1,7 +1,8 @@
 package bms.player.beatoraja.skin.lua;
 
+import bms.player.beatoraja.skin.SkinPathPolicy;
 import java.nio.file.Path;
-import java.nio.file.Files;
+import java.io.IOException;
 import java.util.function.Supplier;
 
 import org.luaj.vm2.LuaError;
@@ -15,31 +16,10 @@ final class SkinLuaPathResolver {
 	}
 
 	Path resolve(String pathText) {
-		Path root = skinDirectorySupplier.get();
-		if(root == null) {
-			throw new LuaError("skin directory is not specified");
+		try {
+			return SkinPathPolicy.resolve(skinDirectorySupplier.get(), pathText);
+		} catch (IOException e) {
+			throw new LuaError(e.getMessage());
 		}
-		root = root.toAbsolutePath().normalize();
-		Path path = Path.of(pathText);
-		Path resolved;
-		if(path.isAbsolute()) {
-			resolved = path.normalize();
-		} else {
-			Path workingDirectoryPath = path.toAbsolutePath().normalize();
-			resolved = workingDirectoryPath.startsWith(root)
-					? workingDirectoryPath
-					: root.resolve(path).toAbsolutePath().normalize();
-		}
-		if(!resolved.startsWith(root)) {
-			throw new LuaError("skin file access denied: " + pathText);
-		}
-		// Check every component, including dangling links and links below missing directories.
-		Path component = root;
-		if (Files.isSymbolicLink(component)) throw new LuaError("skin symbolic link access denied");
-		for (Path name : root.relativize(resolved)) {
-			component = component.resolve(name);
-			if (Files.isSymbolicLink(component)) throw new LuaError("skin symbolic link access denied");
-		}
-		return resolved;
 	}
 }

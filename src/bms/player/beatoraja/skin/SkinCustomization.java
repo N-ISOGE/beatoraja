@@ -23,21 +23,40 @@ public final class SkinCustomization {
 
     private SkinCustomization() { }
 
-    private static Path directory(SkinHeader.CustomFile file) {
-        int slash = file.path.lastIndexOf('/');
-        return slash < 0 ? Path.of(".") : Path.of(file.path.substring(0, Math.max(1, slash)));
+    private static Path directory(String definition) {
+        int slash = definition.lastIndexOf('/');
+        return slash < 0 ? Path.of(".") : Path.of(definition.substring(0, Math.max(1, slash)));
     }
 
     public static List<String> fileChoices(SkinHeader.CustomFile file) {
         if (file.path == null || file.path.isEmpty()) return List.of();
-        String glob = file.path.substring(file.path.lastIndexOf('/') + 1).replace("|", "");
+        return fileChoices(file.path.replace('\\', '/'));
+    }
+
+    static List<String> fileChoices(String definition) {
+        String pattern = definition.substring(definition.lastIndexOf('/') + 1);
+        int firstPipe = pattern.indexOf('|');
+        int lastPipe = pattern.lastIndexOf('|');
+        String glob = firstPipe >= 0 ? pattern.substring(0, firstPipe) + pattern.substring(lastPipe + 1) : pattern;
         if (glob.isEmpty()) return List.of();
-        try (DirectoryStream<Path> paths = Files.newDirectoryStream(directory(file),
-                "{" + glob.toLowerCase(Locale.ROOT) + "," + glob.toUpperCase(Locale.ROOT) + "}")) {
+        try {
+            Path directory = directory(definition);
+            SkinLoader.requirePreviewPath(directory);
+            boolean allowLinks = SkinLoader.previewSkinRoot() == null;
+            var matcher = java.nio.file.FileSystems.getDefault().getPathMatcher("glob:" + glob.toLowerCase(Locale.ROOT));
             var result = new ArrayList<String>();
-            for (Path path : paths) {
-                String name = path.getFileName().toString();
-                if (!name.equals(RANDOM_FILE) && Files.isRegularFile(path, NOFOLLOW_LINKS)) result.add(name);
+            try (DirectoryStream<Path> paths = Files.newDirectoryStream(directory)) {
+                for (Path path : paths) {
+                    String name = path.getFileName().toString();
+                    boolean isRegular = allowLinks ? Files.isRegularFile(path) : Files.isRegularFile(path, NOFOLLOW_LINKS);
+                    if (!name.equals(RANDOM_FILE) && isRegular
+                            && matcher.matches(Path.of(name.toLowerCase(Locale.ROOT)))) {
+                        if (allowLinks && SkinPathPolicy.isSymlinkOrJunction(path)) {
+                            java.util.logging.Logger.getGlobal().warning("Skin file uses symlink or junction: " + path);
+                        }
+                        result.add(name);
+                    }
+                }
             }
             result.sort(String.CASE_INSENSITIVE_ORDER.thenComparing(java.util.Comparator.naturalOrder()));
             return result;
@@ -76,7 +95,7 @@ public final class SkinCustomization {
                 name = choices.get(ThreadLocalRandom.current().nextInt(choices.size()));
             if (!choices.contains(name))
                 throw new IllegalArgumentException("Skin file no longer available: " + change.name + " / " + change.path);
-            var path = directory(file).resolve(name);
+            var path = directory(file.path.replace('\\', '/')).resolve(name);
             if (!Files.isReadable(path))
                 throw new IllegalArgumentException("Skin file is not readable: " + path);
             String lower = name.toLowerCase(Locale.ROOT);

@@ -1,5 +1,8 @@
 package bms.player.beatoraja.skin.lua;
 
+import java.util.function.Supplier;
+import java.io.ByteArrayInputStream;
+import bms.player.beatoraja.skin.SkinPathPolicy;
 import java.io.ByteArrayOutputStream;
 import java.io.EOFException;
 import java.io.IOException;
@@ -17,7 +20,6 @@ import org.luaj.vm2.lib.jse.*;
 
 import bms.player.beatoraja.MainState;
 import bms.player.beatoraja.skin.SkinHeader;
-import bms.player.beatoraja.skin.SkinProperty;
 import bms.player.beatoraja.skin.SkinHeader.CustomOffset;
 import bms.player.beatoraja.skin.SkinHeader.CustomOption;
 import bms.player.beatoraja.skin.property.*;
@@ -34,7 +36,9 @@ public class SkinLuaAccessor implements com.badlogic.gdx.utils.Disposable {
 	private final Globals globals;
 	private Path sandboxRoot;
 	private Path skinDirectory;
+	static final int MAX_FILE_BYTES = 8 * 1024 * 1024;
 	private final RestrictedIoLib restrictedIo;
+	private final LegacySkinLuaApi legacyApi;
 
 	// 各機能のエクスポート先を globals にするかどうか
 	private final boolean isGlobal;
@@ -47,21 +51,24 @@ public class SkinLuaAccessor implements com.badlogic.gdx.utils.Disposable {
 	public SkinLuaAccessor(boolean isGlobal) {
 		restrictedIo = new RestrictedIoLib();
 		globals = createStandardGlobals(restrictedIo);
+		globals.finder = new SkinResourceFinder(this::getSkinDirectory);
 		this.isGlobal = isGlobal;
 
 		restrictStandardGlobals();
-		LegacySkinLuaApi.install(globals, this::getSkinDirectory);
+		legacyApi = new LegacySkinLuaApi();
+		legacyApi.install(globals, this::getSkinDirectory);
 		initializeModules();
 	}
 
 	public SkinLuaAccessor(boolean isGlobal, Path sandboxRoot) {
 		this.isGlobal = isGlobal;
 		this.restrictedIo = null;
+		this.legacyApi = null;
 		this.sandboxRoot = sandboxRoot != null ? normalizeSandboxRoot(sandboxRoot) : Path.of("").toAbsolutePath().normalize();
 		this.skinDirectory = this.sandboxRoot;
 		globals = createSandboxGlobals(this.sandboxRoot);
 
-		globals.finder = new SkinResourceFinder(this.sandboxRoot);
+		globals.finder = new SkinResourceFinder(() -> this.sandboxRoot);
 		restrictPackageLoaders();
 		initializeModules();
 	}
@@ -174,16 +181,8 @@ public class SkinLuaAccessor implements com.badlogic.gdx.utils.Disposable {
 
 		@Override
 		protected File openFile(String filename, boolean readMode, boolean appendMode, boolean updateMode, boolean binaryMode) throws IOException {
-			Path path = resolve(filename);
-			if (!path.startsWith(root)) {
-				throw new IOException("Lua sandbox access denied: " + filename);
-			}
-			if (readMode) {
-				if (!Files.isRegularFile(path)) {
-					throw new IOException("Lua sandbox file not found: " + filename);
-				}
-				return new SandboxFile(Files.readAllBytes(path));
-			}
+			Path path = SkinPathPolicy.resolve(root, filename);
+			if (readMode) return new SandboxFile(SkinPathPolicy.read(path, MAX_FILE_BYTES));
 			return new SandboxFile();
 		}
 
@@ -195,19 +194,6 @@ public class SkinLuaAccessor implements com.badlogic.gdx.utils.Disposable {
 		@Override
 		protected File openProgram(String prog, String mode) throws IOException {
 			throw new IOException("Lua sandbox popen is not allowed");
-		}
-
-		private Path resolve(String filename) {
-			Path path = Path.of(filename);
-			if (path.isAbsolute()) {
-				return path.normalize();
-			}
-
-			Path workingDirectoryPath = path.toAbsolutePath().normalize();
-			if (workingDirectoryPath.startsWith(root)) {
-				return workingDirectoryPath;
-			}
-			return root.resolve(path).toAbsolutePath().normalize();
 		}
 
 		private class SandboxFile extends File {
@@ -230,6 +216,7 @@ public class SkinLuaAccessor implements com.badlogic.gdx.utils.Disposable {
 			public void write(LuaString string) throws IOException {
 				checkClosed();
 				if (output != null) {
+					if (string.m_length > MAX_FILE_BYTES - output.size()) throw new IOException("Lua output too large");
 					output.write(string.m_bytes, string.m_offset, string.m_length);
 				}
 			}
@@ -340,7 +327,7 @@ public class SkinLuaAccessor implements com.badlogic.gdx.utils.Disposable {
 		@Override
 		protected File openFile(String filename, boolean readMode, boolean appendMode, boolean updateMode, boolean binaryMode) throws IOException {
 			Path path = resolve(filename);
-			if (readMode && !Files.isRegularFile(path)) {
+			if (readMode && (!Files.isRegularFile(path, java.nio.file.LinkOption.NOFOLLOW_LINKS) || Files.size(path) > MAX_FILE_BYTES)) {
 				throw new IOException("Lua file not found: " + filename);
 			}
 			if (readMode && !updateMode) {
@@ -375,39 +362,11 @@ public class SkinLuaAccessor implements com.badlogic.gdx.utils.Disposable {
 		}
 
 		private Path resolve(String filename) throws IOException {
-			Path root = requireRoot();
-			Path path = Path.of(filename);
-			Path resolved;
-			if (path.isAbsolute()) {
-				resolved = path.normalize();
-			} else {
-				Path workingDirectoryPath = path.toAbsolutePath().normalize();
-				resolved = workingDirectoryPath.startsWith(root)
-						? workingDirectoryPath
-						: root.resolve(path).toAbsolutePath().normalize();
-			}
-			if (!resolved.startsWith(root)) {
-				throw new IOException("Lua skin file access denied: " + filename);
-			}
-			// Check components even when the final file does not exist (write/append).
-			Path component = root;
-			for (Path name : root.relativize(resolved)) {
-				component = component.resolve(name);
-				if (Files.isSymbolicLink(component)) {
-					throw new IOException("Lua skin symbolic link access denied: " + filename);
-				}
-			}
-			return resolved;
+			return SkinPathPolicy.resolve(root, filename);
 		}
 
 		private Path requireRoot() throws IOException {
-			if (root == null) {
-				throw new IOException("Lua skin directory is not specified");
-			}
-			if (Files.isSymbolicLink(root)) {
-				throw new IOException("Lua skin symbolic link access denied: " + root);
-			}
-			return root;
+			return SkinPathPolicy.requireInside(root, root);
 		}
 
 		private class RestrictedFile extends File {
@@ -850,36 +809,30 @@ public class SkinLuaAccessor implements com.badlogic.gdx.utils.Disposable {
 	}
 
 	public LuaValue execFile(Path path) {
-		if (sandboxRoot != null) {
-			Path normalizedPath = normalizeSandboxRoot(path);
-			if (normalizedPath == null || !isInsideSandbox(normalizedPath) || !Files.isRegularFile(normalizedPath)) {
-				throw new LuaError("Lua sandbox access denied: " + path);
-			}
-			try (InputStream stream = Files.newInputStream(normalizedPath)) {
-				return globals.load(stream, "@" + normalizedPath, "bt", globals).call();
-			} catch (IOException e) {
-				throw new LuaError("Lua sandbox load failed: " + path + " : " + e.getMessage());
-			}
+		Path root = sandboxRoot == null ? skinDirectory : sandboxRoot;
+		try {
+			Path source = SkinPathPolicy.requireInside(root, path);
+			byte[] bytes = SkinPathPolicy.read(source, MAX_FILE_BYTES);
+			return globals.load(new ByteArrayInputStream(bytes), "@" + source, "bt", globals).call();
+		} catch (IOException e) {
+			throw new LuaError("Lua skin script unavailable: " + e.getMessage());
 		}
-		return globals.loadfile(path.toString()).call();
 	}
 
 	public void setDirectory(Path path) {
 		LuaTable pkg = globals.get("package").checktable();
-		Path normalizedPath = normalizeSandboxRoot(path != null ? path : Path.of(""));
-		skinDirectory = normalizedPath;
+		Path directory = normalizeSandboxRoot(path != null ? path : Path.of(""));
 		if (sandboxRoot != null) {
-			if (normalizedPath == null) {
-				throw new LuaError("Lua sandbox directory is not specified");
+			try {
+				SkinPathPolicy.requireInside(sandboxRoot, directory);
+			} catch (IOException e) {
+				throw new LuaError(e.getMessage());
 			}
-			if (!isInsideSandbox(normalizedPath)) {
-				throw new LuaError("Lua sandbox access denied: " + path);
-			}
-			pkg.set("path", normalizedPath + "/?.lua;" + normalizedPath + "/?/init.lua");
 		} else {
-			restrictedIo.setRoot(normalizedPath);
-			pkg.set("path", pkg.get("path").tojstring() + ";" + normalizedPath + "/?.lua");
+			restrictedIo.setRoot(directory);
 		}
+		skinDirectory = directory;
+		pkg.set("path", directory + "/?.lua;" + directory + "/?/init.lua");
 	}
 
 	/**
@@ -904,6 +857,7 @@ public class SkinLuaAccessor implements com.badlogic.gdx.utils.Disposable {
 
 	@Override public void dispose() {
 		if (mainStateAccessor != null) mainStateAccessor.dispose();
+		if (legacyApi != null) legacyApi.dispose();
 	}
 
 	private Path getSkinDirectory() {
@@ -955,7 +909,15 @@ public class SkinLuaAccessor implements com.badlogic.gdx.utils.Disposable {
 		table.set("get_path", new OneArgFunction() {
 			@Override
 			public LuaValue call(LuaValue value) {
-				return LuaString.valueOf(filePathGetter.apply(value.tojstring()));
+				String file = filePathGetter.apply(value.tojstring());
+				if (sandboxRoot != null) {
+					try {
+						SkinPathPolicy.requireInside(sandboxRoot, Path.of(file));
+					} catch (IOException | java.nio.file.InvalidPathException e) {
+						return LuaValue.NIL;
+					}
+				}
+				return LuaString.valueOf(file);
 			}
 		});
 
@@ -1001,41 +963,21 @@ public class SkinLuaAccessor implements com.badlogic.gdx.utils.Disposable {
 		return path != null ? path.toAbsolutePath().normalize() : null;
 	}
 
-	private boolean isInsideSandbox(Path path) {
-		return sandboxRoot == null || path.toAbsolutePath().normalize().startsWith(sandboxRoot);
-	}
-
 	private static class SkinResourceFinder implements ResourceFinder {
-		private final Path root;
+		private final Supplier<Path> root;
 
-		private SkinResourceFinder(Path root) {
+		private SkinResourceFinder(Supplier<Path> root) {
 			this.root = root;
 		}
 
 		@Override
 		public InputStream findResource(String filename) {
-			Path resolved = resolve(filename);
-			if (!resolved.startsWith(root) || !Files.isRegularFile(resolved)) {
-				return null;
-			}
 			try {
-				return Files.newInputStream(resolved);
+				Path resolved = SkinPathPolicy.resolve(root.get(), filename);
+				return new ByteArrayInputStream(SkinPathPolicy.read(resolved, MAX_FILE_BYTES));
 			} catch (IOException e) {
 				return null;
 			}
-		}
-
-		private Path resolve(String filename) {
-			Path path = Path.of(filename);
-			if (path.isAbsolute()) {
-				return path.normalize();
-			}
-
-			Path workingDirectoryPath = path.toAbsolutePath().normalize();
-			if (workingDirectoryPath.startsWith(root)) {
-				return workingDirectoryPath;
-			}
-			return root.resolve(path).toAbsolutePath().normalize();
 		}
 	}
 }
