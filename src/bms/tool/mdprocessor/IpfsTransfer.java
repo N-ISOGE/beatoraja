@@ -268,6 +268,17 @@ final class IpfsTransfer {
             if (top.isEmpty()) {
                 throw new IOException("IPFS archive is empty");
             }
+            if (top.size() == 1 && Files.isRegularFile(top.get(0))) {
+                Path single = top.get(0);
+                String fileName = single.getFileName().toString();
+                if (!isChartName(fileName) && !type.contains("html") && looksLikeChartText(single)) {
+                    String refLeaf = ref.substring(ref.lastIndexOf('/') + 1);
+                    String targetName = isChartName(refLeaf) ? refLeaf : fileName + ".bms";
+                    if (!targetName.equals(fileName)) {
+                        Files.move(single, extracted.resolve(targetName));
+                    }
+                }
+            }
             Path source = top.size() == 1 && Files.isDirectory(top.get(0)) ? top.get(0) : extracted;
             copyTree(source, content, output);
         }
@@ -357,6 +368,27 @@ final class IpfsTransfer {
 
     private static boolean isChartName(String name) {
         return name.toLowerCase(Locale.ROOT).matches(".*\\.(bms|bme|bml|pms|bmson)");
+    }
+
+    private static boolean looksLikeChartText(Path file) throws IOException {
+        byte[] sample;
+        try (InputStream in = Files.newInputStream(file, LinkOption.NOFOLLOW_LINKS)) {
+            sample = in.readNBytes(512);
+        }
+        if (sample.length == 0) {
+            return false;
+        }
+        for (byte b : sample) {
+            int u = b & 0xff;
+            if (u == 0 || (u < 0x20 && u != '\t' && u != '\r' && u != '\n' && u != '\f' && u != 0x1b)) {
+                return false;
+            }
+        }
+        int start = sample.length >= 3 && (sample[0] & 0xff) == 0xef
+                && (sample[1] & 0xff) == 0xbb && (sample[2] & 0xff) == 0xbf ? 3 : 0;
+        String text = new String(sample, start, sample.length - start, StandardCharsets.UTF_8)
+                .stripLeading().toLowerCase(Locale.ROOT);
+        return !text.startsWith("<!doctype html") && !text.startsWith("<html");
     }
 
     private static boolean isVisible(Path relative) {

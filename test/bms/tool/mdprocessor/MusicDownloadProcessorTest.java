@@ -34,6 +34,7 @@ public class MusicDownloadProcessorTest {
         validateInputsAndLimits();
         runtimeScanRoots(root.resolve("scan"));
         transferAndHandoff(root.resolve("transfer"));
+        extensionlessTarEntries(root.resolve("extensionless-tar"));
         diffsAndFailure(root.resolve("diffs"));
         disposeActiveDownload(root.resolve("dispose"));
         System.out.println("D2 IPFS regression passed: input limits, RPC and gateway, FIFO, diffs, failures, disposal");
@@ -128,6 +129,59 @@ public class MusicDownloadProcessorTest {
         } finally {
             kubo.dispose();
             http.dispose();
+            server.stop(0);
+        }
+    }
+
+    private static void extensionlessTarEntries(Path root) throws Exception {
+        Files.createDirectories(root);
+        Path local = Files.createDirectory(root.resolve("local"));
+        Path baseChart = Files.write(local.resolve("base.bms"), CHART);
+        byte[] bareTar = tar(CID, false);
+        byte[] leafNamedTar = tar("blob", false);
+        byte[] diffTar = tar("diff_entry", false);
+        byte[] htmlTar = tarBytes("index", "<!DOCTYPE html><html></html>".getBytes(StandardCharsets.UTF_8), false);
+
+        HttpServer server = server();
+        server.createContext("/ipfs/", exchange -> {
+            String path = exchange.getRequestURI().getPath();
+            if (path.endsWith("/" + CID)) {
+                reply(exchange, 200, "application/x-tar", bareTar);
+            } else if (path.endsWith("/chart.bms")) {
+                reply(exchange, 200, "application/x-tar", leafNamedTar);
+            } else if (path.endsWith("/diff")) {
+                reply(exchange, 200, "application/x-tar", diffTar);
+            } else if (path.endsWith("/html")) {
+                reply(exchange, 200, "application/x-tar", htmlTar);
+            } else {
+                reply(exchange, 404, "text/plain", new byte[0]);
+            }
+        });
+        server.start();
+
+        MusicDownloadProcessor processor = new MusicDownloadProcessor(url(server) + "/ipfs",
+                hashes -> new String[] {baseChart.toString()}, root.resolve("managed"));
+        try {
+            processor.start(song(CID, null, "Bare TAR"));
+            await(() -> processor.getDownloadpath() != null, "bare extensionless TAR");
+            require(processor.handoff(p -> Files.isRegularFile(Path.of(p).resolve(CID + ".bms"))),
+                    "bare extensionless TAR renamed to .bms");
+
+            processor.start(song(CID_V1 + "/chart.bms", null, "Leaf named TAR"));
+            await(() -> processor.getDownloadpath() != null, "refLeaf TAR");
+            require(processor.handoff(p -> Files.isRegularFile(Path.of(p).resolve("chart.bms"))),
+                    "extensionless TAR uses refLeaf chart name");
+
+            processor.start(new Song(null, CID + "/diff", null, "Diff TAR", List.of(MD5)));
+            await(() -> processor.getDownloadpath() != null, "diff extensionless TAR");
+            require(processor.handoff(p -> Files.isRegularFile(Path.of(p).resolve("base.bms"))
+                    && Files.isRegularFile(Path.of(p).resolve("diff_entry.bms"))),
+                    "diff extensionless TAR renamed to .bms");
+
+            processor.start(song(CID + "/html", null, "HTML TAR"));
+            require(awaitFailure(processor).contains("no chart file"), "HTML TAR entry not renamed to .bms");
+        } finally {
+            processor.dispose();
             server.stop(0);
         }
     }
@@ -256,12 +310,16 @@ public class MusicDownloadProcessorTest {
     }
 
     private static byte[] tar(String filename, boolean gzip) throws IOException {
+        return tarBytes(filename, CHART, gzip);
+    }
+
+    private static byte[] tarBytes(String filename, byte[] data, boolean gzip) throws IOException {
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();
         try (TarArchiveOutputStream archive = new TarArchiveOutputStream(gzip ? new GZIPOutputStream(bytes) : bytes)) {
             TarArchiveEntry entry = new TarArchiveEntry(filename);
-            entry.setSize(CHART.length);
+            entry.setSize(data.length);
             archive.putArchiveEntry(entry);
-            archive.write(CHART);
+            archive.write(data);
             archive.closeArchiveEntry();
         }
         return bytes.toByteArray();
