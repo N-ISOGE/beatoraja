@@ -18,6 +18,7 @@ import bms.player.beatoraja.play.JudgeAlgorithm;
 import bms.player.beatoraja.play.SecondaryScoringRule;
 import bms.player.beatoraja.play.TargetProperty;
 import bms.player.beatoraja.song.*;
+import bms.tool.mdprocessor.MusicDownloadProcessor;
 import javafx.application.Platform;
 import javafx.event.ActionEvent;
 import javafx.event.Event;
@@ -813,7 +814,7 @@ public class PlayConfigurationView implements Initializable {
                 SongInformationAccessor infodb = config.isUseSongInfo()
                         ? new SongInformationAccessor(config.getSonginfopath()) : null;
                 Logger.getGlobal().info("song.db更新開始");
-                songdb.updateSongDatas(updatepath, config.getBmsroot(), updateAll, infodb);
+                songdb.updateSongDatas(updatepath, MusicDownloadProcessor.songScanRoots(config.getBmsroot()), updateAll, infodb);
                 Logger.getGlobal().info("song.db更新完了");
                 updated = true;
             } catch (Throwable e) {
