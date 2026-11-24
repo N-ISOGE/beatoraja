@@ -235,6 +235,7 @@ val regressionClasses = listOf(
     "bms.player.beatoraja.skin.BitmapTextRunsTest",
     "bms.player.beatoraja.skin.FontLifetimeTest",
     "bms.player.beatoraja.skin.BitmapFontLoaderTest",
+    "bms.player.beatoraja.TableDataBoundaryTest",
     "bms.player.beatoraja.skin.lr2.PlayerReviewLevelTest",
     "bms.player.beatoraja.result.MusicResultReviewTest",
     "bms.player.beatoraja.result.MusicResultScoreDisplayTest",
