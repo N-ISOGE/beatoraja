@@ -6,8 +6,10 @@ import java.io.StringReader;
 import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.Charset;
+import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.util.logging.Logger;
 
 /** Decodes skin definition text consistently. スキン定義を共通の規則で読み取る。 */
 public final class SkinTextReader {
@@ -22,7 +24,8 @@ public final class SkinTextReader {
     }
 
     static String readText(Path path) throws IOException {
-        return decode(SkinPathPolicy.read(path, MAX_BYTES));
+        boolean allowLinks = SkinLoader.previewSkinRoot() == null;
+        return decode(SkinPathPolicy.read(path, MAX_BYTES, allowLinks));
     }
 
     static String decode(byte[] bytes) throws CharacterCodingException {
@@ -35,7 +38,16 @@ public final class SkinTextReader {
             try {
                 return decode(bytes, 0, MS932);
             } catch (CharacterCodingException invalidMs932) {
-                return decode(bytes, 0, MS949);
+                try {
+                    return decode(bytes, 0, MS949);
+                } catch (CharacterCodingException invalidMs949) {
+                    Logger.getGlobal().warning("Skin text decoding failed for UTF-8/MS932/MS949; falling back to MS932 with replacement");
+                    return MS932.newDecoder()
+                            .onMalformedInput(CodingErrorAction.REPLACE)
+                            .onUnmappableCharacter(CodingErrorAction.REPLACE)
+                            .decode(ByteBuffer.wrap(bytes))
+                            .toString();
+                }
             }
         }
     }

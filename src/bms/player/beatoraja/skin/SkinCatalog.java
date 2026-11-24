@@ -11,11 +11,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.logging.Logger;
-
-import static java.nio.file.LinkOption.NOFOLLOW_LINKS;
 
 public final class SkinCatalog {
     private SkinCatalog() { }
@@ -41,20 +40,24 @@ public final class SkinCatalog {
     public static List<Path> scanSkinFiles(Path root) {
         var files = new ArrayList<Path>();
         var pending = new ArrayDeque<Path>();
+        var visitedDirs = new HashSet<Path>();
         pending.add(root);
         while (!pending.isEmpty()) {
             Path path = pending.removeLast();
             try {
-                if (Files.isDirectory(path, NOFOLLOW_LINKS)) {
-                    SkinPathPolicy.requireInside(root, path);
+                if (Files.isDirectory(path)) {
+                    SkinPathPolicy.requireInside(root, path, true);
+                    if (!visitedDirs.add(path.toRealPath())) {
+                        continue;
+                    }
                     try (var children = Files.list(path)) {
                         children.forEach(pending::add);
                     }
                 } else {
                     String name = path.toString().toLowerCase(Locale.ROOT);
                     if ((name.endsWith(".json") || name.endsWith(".luaskin") || name.endsWith(".lr2skin"))
-                            && Files.isRegularFile(path, NOFOLLOW_LINKS)) {
-                        SkinPathPolicy.requireInside(root, path);
+                            && Files.isRegularFile(path)) {
+                        SkinPathPolicy.requireInside(root, path, true);
                         files.add(path);
                     }
                 }

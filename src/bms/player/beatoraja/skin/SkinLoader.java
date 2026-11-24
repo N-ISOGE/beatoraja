@@ -214,7 +214,7 @@ public abstract class SkinLoader {
         return imagefile;
     }
 
-    static Path previewSkinRoot() {
+    public static Path previewSkinRoot() {
         return previewSkinRoot.get();
     }
 

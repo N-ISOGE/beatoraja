@@ -765,7 +765,8 @@ public abstract class LR2SkinCSVLoader<S extends Skin> extends LR2SkinLoader {
 		boolean parentIfs = ifs;
 		try {
 			Path root = Path.of(skinpath);
-			Path include = SkinPathPolicy.requireInside(root, getPath(skinpath, name, filemap).toPath());
+			boolean allowLinks = bms.player.beatoraja.skin.SkinLoader.previewSkinRoot() == null;
+			Path include = SkinPathPolicy.requireInside(root, getPath(skinpath, name, filemap).toPath(), allowLinks);
 			if (activeIncludes.size() > MAX_INCLUDE_DEPTH || !activeIncludes.add(include)) return;
 			try (var reader = SkinTextReader.open(include)) {
 				skip = false;

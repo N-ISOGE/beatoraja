@@ -27,16 +27,24 @@ public class JsonSkinSerializer {
 	private SkinLuaAccessor lua;
 	private final Function<String, File> pathGetter;
 	private final HashSet<Path> includes = new HashSet<>();
+	private final Path explicitPreviewRoot;
+	private Path previewRoot;
 	private Path includeRoot;
 	private static final int MAX_INCLUDE_DEPTH = 16;
 
 	public JsonSkinSerializer(SkinLuaAccessor lua, Function<String, File> pathGetter) {
+		this(lua, pathGetter, null);
+	}
+
+	public JsonSkinSerializer(SkinLuaAccessor lua, Function<String, File> pathGetter, Path previewRoot) {
 		this.lua = lua;
 		this.pathGetter = pathGetter;
+		this.explicitPreviewRoot = previewRoot;
 	}
 
 	public void setSerializers(Json json, HashSet<Integer> enabledOptions, Path path) {
 		Path entry = path.toAbsolutePath().normalize();
+		previewRoot = explicitPreviewRoot != null ? explicitPreviewRoot : SkinLoader.previewSkinRoot();
 		includeRoot = entry.getParent();
 		includes.clear();
 		includes.add(entry);
@@ -232,7 +240,20 @@ public class JsonSkinSerializer {
 			Path directory = parent.getParent() == null ? Path.of(".") : parent.getParent();
 			Path relative = directory.resolve(reference);
 			Path childPath = pathGetter.apply(relative.toString().replace('\\', '/')).toPath();
-			Path path = SkinPathPolicy.requireInside(includeRoot, childPath);
+			Path normalizedChild = childPath.toAbsolutePath().normalize();
+			Path path;
+			if (previewRoot != null) {
+				path = SkinPathPolicy.requireInside(includeRoot, normalizedChild);
+				SkinPathPolicy.requireInside(previewRoot, path);
+			} else if (!normalizedChild.startsWith(includeRoot)) {
+				java.util.logging.Logger.getGlobal().warning("JSON skin include walks outside skin root in normal play: " + normalizedChild);
+				if (SkinPathPolicy.isSymlinkOrJunction(normalizedChild)) {
+					java.util.logging.Logger.getGlobal().warning("Skin path uses symlink or junction: " + normalizedChild);
+				}
+				path = normalizedChild;
+			} else {
+				path = SkinPathPolicy.requireInside(includeRoot, normalizedChild, true);
+			}
 			if (includes.size() > MAX_INCLUDE_DEPTH || !includes.add(path)) return null;
 			try (var reader = SkinTextReader.open(path)) {
 				Json child = new Json();
