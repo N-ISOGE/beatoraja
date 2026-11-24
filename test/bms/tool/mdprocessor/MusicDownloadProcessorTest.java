@@ -177,9 +177,9 @@ public class MusicDownloadProcessorTest {
 
             processor.start(new Song(null, CID + "/diff", null, "Diff TAR", List.of(MD5)));
             await(() -> processor.getDownloadpath() != null, "diff extensionless TAR");
-            require(processor.handoff(p -> Files.isRegularFile(Path.of(p).resolve("base.bms"))
+            require(processor.handoff(p -> !Files.exists(Path.of(p).resolve("base.bms"))
                     && Files.isRegularFile(Path.of(p).resolve("diff_entry.bms"))),
-                    "diff extensionless TAR renamed to .bms");
+                    "diff extensionless TAR renamed to .bms and base chart excluded");
 
             processor.start(song(CID + "/html", null, "HTML TAR"));
             require(awaitFailure(processor).contains("no chart file"), "HTML TAR entry not renamed to .bms");
@@ -291,7 +291,9 @@ public class MusicDownloadProcessorTest {
         Path chart = Files.write(local.resolve("base.bms"), CHART);
         Files.writeString(local.resolve("asset.txt"), "original");
         AtomicReference<String[]> lookedUp = new AtomicReference<>();
-        byte[] diff = tar("wrapped/diff.bms", false);
+        byte[] diff = tarEntries(false,
+                "wrapped/diff.bms", CHART,
+                "wrapped/asset.txt", "overlaid".getBytes(StandardCharsets.UTF_8));
         HttpServer server = server();
         server.createContext("/api/v0/get", exchange -> reply(exchange, 405, "text/plain", new byte[0]));
         server.createContext("/ipfs/", exchange -> {
@@ -321,10 +323,21 @@ public class MusicDownloadProcessorTest {
             await(() -> processor.getDownloadpath() != null, "diff-only install");
             Path installed = Path.of(processor.getDownloadpath());
             require(Arrays.equals(lookedUp.get(), new String[] {MD5}), "valid MD5s only");
-            require(Files.isRegularFile(installed.resolve("base.bms")) && Files.isRegularFile(installed.resolve("diff.bms")),
-                    "physical parent copied before overlay");
-            require(Files.readString(installed.resolve("asset.txt")).equals("original")
-                    && !Files.exists(local.resolve("diff.bms")), "source files unchanged");
+            require(!Files.exists(installed.resolve("base.bms")) && Files.isRegularFile(installed.resolve("diff.bms")),
+                    "base chart excluded and diff chart installed");
+            require(Files.readString(installed.resolve("asset.txt")).equals("overlaid")
+                    && Files.readString(local.resolve("asset.txt")).equals("original")
+                    && !Files.exists(local.resolve("diff.bms")), "diff unlinks hardlink and leaves source untouched");
+            IpfsTransfer.linkOrCopy(local.resolve("asset.txt"), root.resolve("fallback-io.txt"),
+                    new IpfsTransfer.Budget(), (link, existing) -> { throw new IOException("cross-device"); });
+            IpfsTransfer.linkOrCopy(local.resolve("asset.txt"), root.resolve("fallback-uoe.txt"),
+                    new IpfsTransfer.Budget(), (link, existing) -> { throw new UnsupportedOperationException(); });
+            IpfsTransfer.linkOrCopy(local.resolve("asset.txt"), root.resolve("fallback-sec.txt"),
+                    new IpfsTransfer.Budget(), (link, existing) -> { throw new SecurityException(); });
+            require(Files.readString(root.resolve("fallback-io.txt")).equals("original")
+                    && Files.readString(root.resolve("fallback-uoe.txt")).equals("original")
+                    && Files.readString(root.resolve("fallback-sec.txt")).equals("original"),
+                    "hardlink fallback copies on IO/Unsupported/Security exceptions");
             processor.setDownloadpath(null);
 
             processor.start(song(CID + "/unavailable", null, "Missing"));
@@ -413,13 +426,21 @@ public class MusicDownloadProcessorTest {
     }
 
     private static byte[] tarBytes(String filename, byte[] data, boolean gzip) throws IOException {
+        return tarEntries(gzip, filename, data);
+    }
+
+    private static byte[] tarEntries(boolean gzip, Object... nameDataPairs) throws IOException {
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();
         try (TarArchiveOutputStream archive = new TarArchiveOutputStream(gzip ? new GZIPOutputStream(bytes) : bytes)) {
-            TarArchiveEntry entry = new TarArchiveEntry(filename);
-            entry.setSize(data.length);
-            archive.putArchiveEntry(entry);
-            archive.write(data);
-            archive.closeArchiveEntry();
+            for (int i = 0; i < nameDataPairs.length; i += 2) {
+                String filename = (String) nameDataPairs[i];
+                byte[] data = (byte[]) nameDataPairs[i + 1];
+                TarArchiveEntry entry = new TarArchiveEntry(filename);
+                entry.setSize(data.length);
+                archive.putArchiveEntry(entry);
+                archive.write(data);
+                archive.closeArchiveEntry();
+            }
         }
         return bytes.toByteArray();
     }
