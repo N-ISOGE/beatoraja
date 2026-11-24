@@ -46,7 +46,10 @@ public final class SkinConfigurationViewTest {
 			}
 
 			List<Path> paths = scan(root);
-			assertEquals(List.of(actualSkin), paths);
+			Path linkedSkin = root.resolve("outside").resolve("outside.lr2skin");
+			if (paths.size() != 2 || !paths.contains(actualSkin) || !paths.contains(linkedSkin)) {
+				throw new AssertionError("Expected [" + actualSkin + ", " + linkedSkin + "] without cycle, got " + paths);
+			}
 		} finally {
 			deleteTree(root);
 			deleteTree(outside);

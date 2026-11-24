@@ -199,7 +199,7 @@ public class SkinConfigurationView implements Initializable {
 
     public void update(Config config) {
         systemConfig = config;
-        restrictSkinPreviewEffects.setSelected(config.isRestrictSkinPreviewEffects());
+        if (restrictSkinPreviewEffects != null) restrictSkinPreviewEffects.setSelected(config.isRestrictSkinPreviewEffects());
 		List<Path> skinpaths = new ArrayList<Path>();
 		scan(Paths.get(config.getSkinpath()), skinpaths);
 		for (Path path : skinpaths) {
