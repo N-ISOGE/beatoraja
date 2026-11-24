@@ -2,10 +2,12 @@ package bms.player.beatoraja.skin;
 
 import java.io.BufferedReader;
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
@@ -30,6 +32,8 @@ final class BitmapFontLoader {
 	 * Reference characters for the representative vertical offset, highest priority first.
 	 */
 	private static final int[] VERTICAL_ANCHORS = { 'S', 'P', 'A', 'N', 'O', 'T', 'H', 'E', 'R', '[', ']', 'M', '0' };
+
+	private static final int MAX_FONT_BYTES = 32 * 1024 * 1024;
 
 	private BitmapFontLoader() {
 	}
@@ -57,7 +61,7 @@ final class BitmapFontLoader {
 		try {
 			if (previewRoot != null) SkinPathPolicy.requireInside(previewRoot, _fontPath);
 			FileHandle fontFile = new FileHandle(_fontPath.toFile());
-			RemappedFontFile remappedFontFile = createRemappedFontFile(fontFile);
+			RemappedFontFile remappedFontFile = createRemappedFontFile(fontFile, previewRoot);
 			_fontData = new BitmapFont.BitmapFontData(remappedFontFile.fileHandle, false);
 			_supplementaryGlyphs = remappedFontFile.supplementaryGlyphs;
 
@@ -123,14 +127,20 @@ final class BitmapFontLoader {
 
 	/**
 	 * libGDX が読めない補助平面(U+10000 以上)の char/kerning 行を取り除き、件数を数え直した .fnt を返す。
-	 * 取り除いた char は supplementaryGlyphs に別途保持する。補助平面がなければ元のハンドルをそのまま返す。
+	 * 取り除いた char は supplementaryGlyphs に別途保持する。補助平面がなく元バイト列が UTF-8 と一致すれば元のハンドルをそのまま返す。
 	 * Strips supplementary-plane (U+10000+) char/kerning lines that libGDX cannot read and fixes the counts.
-	 * Removed chars are kept in supplementaryGlyphs. Uses normalized text for the bitmap font reader.
+	 * Removed chars are kept in supplementaryGlyphs. Returns the original handle when no supplementary chars exist and raw bytes already match UTF-8.
 	 */
 	static RemappedFontFile createRemappedFontFile(FileHandle fontFile) {
+		return createRemappedFontFile(fontFile, null);
+	}
+
+	static RemappedFontFile createRemappedFontFile(FileHandle fontFile, Path previewRoot) {
+		byte[] rawBytes;
 		String fontText;
 		try {
-			fontText = SkinTextReader.readText(fontFile.file().toPath());
+			rawBytes = readFontBytes(fontFile, previewRoot);
+			fontText = SkinTextReader.decode(rawBytes);
 		} catch (IOException e) {
 			throw new java.io.UncheckedIOException(e);
 		}
@@ -187,11 +197,37 @@ final class BitmapFontLoader {
 		}
 
 		if (glyphMap.isEmpty()) {
-			return new RemappedFontFile(new InMemoryFontFileHandle(fontFile, fontText.getBytes(StandardCharsets.UTF_8)),
+			byte[] utf8Bytes = fontText.getBytes(StandardCharsets.UTF_8);
+			if (Arrays.equals(rawBytes, utf8Bytes)) {
+				return new RemappedFontFile(fontFile, Collections.emptyMap());
+			}
+			return new RemappedFontFile(new InMemoryFontFileHandle(fontFile, utf8Bytes),
 					Collections.emptyMap());
 		}
 		return new RemappedFontFile(new InMemoryFontFileHandle(fontFile, remappedText.toString().getBytes(StandardCharsets.UTF_8)),
 				glyphMap);
+	}
+
+	private static byte[] readFontBytes(FileHandle fontFile, Path previewRoot) throws IOException {
+		if (previewRoot != null) {
+			Path path = fontFile.file().toPath();
+			SkinPathPolicy.requireInside(previewRoot, path);
+			return SkinPathPolicy.read(path, MAX_FONT_BYTES);
+		}
+		try (InputStream in = fontFile.read()) {
+			ByteArrayOutputStream out = new ByteArrayOutputStream();
+			byte[] buf = new byte[8192];
+			int total = 0;
+			int read;
+			while ((read = in.read(buf)) != -1) {
+				total += read;
+				if (total > MAX_FONT_BYTES) {
+					throw new IOException("Font file too large: " + fontFile);
+				}
+				out.write(buf, 0, read);
+			}
+			return out.toByteArray();
+		}
 	}
 
 	private static BitmapFont.Glyph createGlyph(String line, int codePoint) {

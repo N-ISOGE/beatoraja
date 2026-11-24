@@ -902,6 +902,8 @@ public final class SkinTextBitmap extends SkinText {
 		/** RGBA で描くべき(SDF でない)代替ページ。 / Fallback pages that must be drawn as RGBA (not SDF). */
 		private final Set<Integer> activeFallbackPages = new HashSet<>();
 		private final Set<FallbackFont> acquiredFallbackFonts = new HashSet<>();
+		private final Map<FallbackFont, CacheableBitmapFont> previewFallbackFonts = new HashMap<>();
+		private CacheableBitmapFont previewPrimaryFont;
 		private boolean primaryFontAcquired;
 		private boolean disposed;
 
@@ -997,6 +999,19 @@ public final class SkinTextBitmap extends SkinText {
 		}
 
 		private CacheableBitmapFont getPrimaryCacheableFont() {
+			if (previewRoot != null) {
+				if (previewPrimaryFont != null) {
+					if (previewPrimaryFont.font != null) {
+						previewPrimaryFont.font.dispose();
+					}
+					previewPrimaryFont = null;
+				}
+				previewPrimaryFont = createCacheableFont(fontPath, type);
+				if (previewPrimaryFont != null && previewPrimaryFont.font != null) {
+					previewPrimaryFont.font.setOwnsTexture(true);
+				}
+				return previewPrimaryFont;
+			}
 			if (!primaryFontAcquired) {
 				primaryFontAcquired = true;
 				return BitmapFontCache.acquire(fontPath, type, () -> createCacheableFont(fontPath, type));
@@ -1030,6 +1045,18 @@ public final class SkinTextBitmap extends SkinText {
 		}
 
 		private CacheableBitmapFont getFallbackCacheableFont(FallbackFont fallback) {
+			if (previewRoot != null) {
+				CacheableBitmapFont existing = previewFallbackFonts.get(fallback);
+				if (existing != null) {
+					return existing;
+				}
+				CacheableBitmapFont loaded = createCacheableFont(fallback.path, fallback.type);
+				if (loaded != null && loaded.font != null) {
+					loaded.font.setOwnsTexture(true);
+				}
+				previewFallbackFonts.put(fallback, loaded);
+				return loaded;
+			}
 			if (acquiredFallbackFonts.add(fallback)) {
 				return BitmapFontCache.acquire(fallback.path, fallback.type,
 						() -> createCacheableFont(fallback.path, fallback.type));
@@ -1101,7 +1128,9 @@ public final class SkinTextBitmap extends SkinText {
 				if (fallback == null || fallback.path == null) {
 					continue;
 				}
-				CacheableBitmapFont fallbackFont = BitmapFontCache.Get(fallback.path, fallback.type);
+				CacheableBitmapFont fallbackFont = previewRoot != null
+						? previewFallbackFonts.get(fallback)
+						: BitmapFontCache.Get(fallback.path, fallback.type);
 				Integer pageOffset = fallbackPageOffsets.get(fallback);
 				if (fallbackFont == null || fallbackFont.fontData == null || fallbackFont.regions == null || pageOffset == null) {
 					continue;
@@ -1197,6 +1226,18 @@ public final class SkinTextBitmap extends SkinText {
 				BitmapFontCache.release(fallback.path, fallback.type);
 			}
 			acquiredFallbackFonts.clear();
+			if (previewPrimaryFont != null) {
+				if (previewPrimaryFont.font != null) {
+					previewPrimaryFont.font.dispose();
+				}
+				previewPrimaryFont = null;
+			}
+			for (CacheableBitmapFont previewFallback : previewFallbackFonts.values()) {
+				if (previewFallback != null && previewFallback.font != null) {
+					previewFallback.font.dispose();
+				}
+			}
+			previewFallbackFonts.clear();
 		}
 
 		public static final class FallbackFont {
