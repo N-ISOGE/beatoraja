@@ -286,6 +286,7 @@ public class PixmapResourcePool extends ResourcePool<String, PixmapResourcePool.
 
 	/** Upper bound for an image read fully into memory from a non-local song resource. */
 	static final int MAX_IMAGE_BYTES = 64 * 1024 * 1024;
+	static final long MAX_IMAGE_PIXELS = 64L * 1024L * 1024L;
 
 	private static final int HEADER_BYTES = 12;
 
@@ -344,11 +345,30 @@ public class PixmapResourcePool extends ResourcePool<String, PixmapResourcePool.
 		}
 	}
 
+	/** Returns whether decoded image dimensions are positive and within texture and pixel budgets. */
+	static boolean isValidImageDimensions(int width, int height, int maxTextureSize) {
+		if (width <= 0 || height <= 0 || maxTextureSize <= 0) {
+			return false;
+		}
+		if (width > maxTextureSize || height > maxTextureSize) {
+			return false;
+		}
+		long pixels = (long) width * (long) height;
+		return pixels <= MAX_IMAGE_PIXELS && pixels <= (long) maxTextureSize * (long) maxTextureSize;
+	}
+
 	private static PixmapResource grabWebpFrames(FFmpegFrameGrabber grabber, List<Pixmap> frames, String name)
 			throws Exception {
 		grabber.start();
-		Java2DFrameConverter converter = new Java2DFrameConverter();
 		int maxTextureSize = getMaxTextureSize();
+		int streamWidth = grabber.getImageWidth();
+		int streamHeight = grabber.getImageHeight();
+		if (!isValidImageDimensions(streamWidth, streamHeight, maxTextureSize)) {
+			Logger.getGlobal().warning("WebP画像サイズが上限を超えているか不正です : "
+					+ name + " size=" + streamWidth + "x" + streamHeight + " max=" + maxTextureSize);
+			return null;
+		}
+		Java2DFrameConverter converter = new Java2DFrameConverter();
 		int maxFrames = Integer.MAX_VALUE;
 		Frame frame;
 		while ((frame = grabber.grabImage()) != null) {
@@ -357,6 +377,11 @@ public class PixmapResourcePool extends ResourcePool<String, PixmapResourcePool.
 				continue;
 			}
 			if (frames.isEmpty()) {
+				if (!isValidImageDimensions(image.getWidth(), image.getHeight(), maxTextureSize)) {
+					Logger.getGlobal().warning("WebPフレームサイズが上限を超えているか不正です : "
+							+ name + " size=" + image.getWidth() + "x" + image.getHeight() + " max=" + maxTextureSize);
+					return null;
+				}
 				maxFrames = maxSpriteFrames(image.getWidth(), image.getHeight(), maxTextureSize);
 			}
 			if (frames.size() >= maxFrames) {
@@ -369,7 +394,7 @@ public class PixmapResourcePool extends ResourcePool<String, PixmapResourcePool.
 		return toSpriteSheetPixmap(frames, maxTextureSize);
 	}
 
-	private static PixmapResource toSpriteSheetPixmap(List<Pixmap> frames, int maxTextureSize) {
+	static PixmapResource toSpriteSheetPixmap(List<Pixmap> frames, int maxTextureSize) {
 		if (frames.isEmpty()) {
 			return null;
 		}
@@ -387,12 +412,18 @@ public class PixmapResourcePool extends ResourcePool<String, PixmapResourcePool.
 		int columns = grid[0];
 		int rows = grid[1];
 
-		int width = frameWidth * columns;
-		int height = frameHeight * rows;
-		if (width > maxTextureSize || height > maxTextureSize) {
+		long totalWidth = (long) frameWidth * (long) columns;
+		long totalHeight = (long) frameHeight * (long) rows;
+		if (totalWidth <= 0 || totalHeight <= 0 || totalWidth > maxTextureSize || totalHeight > maxTextureSize
+				|| totalWidth * totalHeight > MAX_IMAGE_PIXELS) {
 			Logger.getGlobal().warning("WebPのスプライトシートサイズが最大テクスチャサイズを超えています : "
-					+ width + "x" + height + " max=" + maxTextureSize);
+					+ totalWidth + "x" + totalHeight + " max=" + maxTextureSize);
+			frames.forEach(Pixmap::dispose);
+			frames.clear();
+			return null;
 		}
+		int width = (int) totalWidth;
+		int height = (int) totalHeight;
 		if (frames.size() > 1) {
 			Logger.getGlobal().info("WebPをスプライトシートとして読み込みました : frames=" + frames.size()
 					+ " grid=" + columns + "x" + rows + " size=" + width + "x" + height);

@@ -58,6 +58,11 @@ public final class ResourcePoolTest {
         }
         check(PixmapResourcePool.maxSpriteFrames(256, 256, 4096) == 256, "256px frames fit 16x16 per texture");
         check(PixmapResourcePool.maxSpriteFrames(8192, 8192, 4096) == 1, "Oversized frame still yields one frame");
+        check(PixmapResourcePool.isValidImageDimensions(1920, 1080, 4096), "1080p dimensions must be valid");
+        check(!PixmapResourcePool.isValidImageDimensions(0, 100, 4096), "Zero width must be rejected");
+        check(!PixmapResourcePool.isValidImageDimensions(100, -1, 4096), "Negative height must be rejected");
+        check(!PixmapResourcePool.isValidImageDimensions(4097, 64, 4096), "Width above maxTextureSize must be rejected");
+        check(!PixmapResourcePool.isValidImageDimensions(8192, 8193, 16384), "Pixel count above MAX_IMAGE_PIXELS must be rejected");
     }
 
     private static void assertPixmapLoading() throws Exception {
@@ -86,12 +91,20 @@ public final class ResourcePoolTest {
             pixmap.dispose();
 
             assertConvertKeepsSpriteSheet();
+            assertOversizedSpriteSheetRejected();
         } finally {
             Gdx.files = oldFiles;
             try (var paths = java.nio.file.Files.walk(directory)) {
                 paths.sorted(java.util.Comparator.reverseOrder()).forEach(path -> path.toFile().delete());
             }
         }
+    }
+
+    private static void assertOversizedSpriteSheetRejected() {
+        List<Pixmap> frames = new ArrayList<>();
+        frames.add(new Pixmap(65, 65, Pixmap.Format.RGBA8888));
+        check(PixmapResourcePool.toSpriteSheetPixmap(frames, 64) == null,
+                "Oversized sprite sheet must be rejected instead of allocating");
     }
 
     private static void assertConvertKeepsSpriteSheet() {
