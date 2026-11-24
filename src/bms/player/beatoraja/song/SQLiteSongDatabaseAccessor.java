@@ -601,19 +601,32 @@ public class SQLiteSongDatabaseAccessor extends SQLiteDatabaseAccessor implement
 					qr.update(conn, "DELETE FROM song WHERE " + dsql.toString(), param);					
 				}
 
-				paths.forEach((p) -> {
-					try {
-						if (scanSongArchives && songArchiveExtractMode == SongArchiveExtractMode.SONG_DIRECTORY) {
-							migrateSongArchives(p, property.conn);
+				List<SongArchives.ExpandedArchive> migratedArchives = new ArrayList<>();
+				try {
+					for (Path p : (Iterable<Path>) paths::iterator) {
+						try {
+							if (scanSongArchives && songArchiveExtractMode == SongArchiveExtractMode.SONG_DIRECTORY) {
+								migrateSongArchives(p, property.conn, migratedArchives);
+							}
+							BMSFolder folder = scanDirectory(p);
+							folder.processDirectory(property);
+						} catch (IOException | IllegalArgumentException | ReflectiveOperationException | IntrospectionException e) {
+							Logger.getGlobal().severe("楽曲データベース更新時の例外:" + e.getMessage());
 						}
-						BMSFolder folder = scanDirectory(p);
-						folder.processDirectory(property);
-					} catch (IOException | SQLException | IllegalArgumentException | ReflectiveOperationException | IntrospectionException e) {
-						Logger.getGlobal().severe("楽曲データベース更新時の例外:" + e.getMessage());
 					}
-				});
-				property.flush();
-				conn.commit();
+					property.flush();
+					conn.commit();
+				} catch (Exception e) {
+					try {
+						conn.rollback();
+					} catch (SQLException rollbackEx) {
+						Logger.getGlobal().log(java.util.logging.Level.WARNING, "Failed to rollback song database update", rollbackEx);
+					}
+					for (int i = migratedArchives.size() - 1; i >= 0; i--) {
+						SongArchives.rollbackExpandedArchive(migratedArchives.get(i));
+					}
+					throw e;
+				}
 			} catch (Exception e) {
 				Logger.getGlobal().severe("楽曲データベース更新時の例外:" + e.getMessage());
 				e.printStackTrace();
@@ -690,7 +703,8 @@ public class SQLiteSongDatabaseAccessor extends SQLiteDatabaseAccessor implement
 			return rootFolder;
 		}
 
-		private void migrateSongArchives(Path start, Connection conn) throws IOException, SQLException {
+		private void migrateSongArchives(Path start, Connection conn,
+				List<SongArchives.ExpandedArchive> migratedArchives) throws IOException, SQLException {
 			List<Path> archives = new ArrayList<>();
 			Files.walkFileTree(start, new SimpleFileVisitor<Path>() {
 				@Override
@@ -721,13 +735,14 @@ public class SQLiteSongDatabaseAccessor extends SQLiteDatabaseAccessor implement
 					// 失敗し得るSQLを移動前に実行し、展開失敗なら戻す。
 					// Finish fallible SQL before moving the archive; roll it back if extraction fails.
 					deleteArchiveRecords(conn, normalizedArchive);
-					Path destination = SongArchives.expandToSongDirectory(normalizedArchive);
-					Logger.getGlobal().info("楽曲アーカイブを展開しました : " + archive + " -> " + destination);
+					SongArchives.ExpandedArchive expanded = SongArchives.expandToSongDirectoryDetailed(normalizedArchive);
+					migratedArchives.add(expanded);
+					Logger.getGlobal().info("楽曲アーカイブを展開しました : " + archive + " -> " + expanded.destination());
 				} catch (IOException e) {
 					conn.rollback(migration);
 					Logger.getGlobal().log(java.util.logging.Level.WARNING, "Archive migration rolled back: " + archive, e);
 					Logger.getGlobal().warning("楽曲アーカイブ展開失敗:" + archive + " : " + e.getMessage());
-				} catch (SQLException e) {
+				} catch (SQLException | RuntimeException e) {
 					conn.rollback(migration);
 					throw e;
 				} finally {

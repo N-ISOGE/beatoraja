@@ -94,11 +94,22 @@ public final class SongArchives {
 		return resource(path).materialize();
 	}
 
+	public record ExpandedArchive(Path originalArchive, Path storedArchive, Path destination) {
+	}
+
 	/**
 	 * Expands an archive beside itself and moves the source archive into the
 	 * reserved, non-scanned archive storage directory.
 	 */
 	public static Path expandToSongDirectory(Path archive) throws IOException {
+		return expandToSongDirectoryDetailed(archive).destination();
+	}
+
+	/**
+	 * Expands an archive beside itself, moves the source archive into the
+	 * reserved storage directory, and returns all paths needed for rollback.
+	 */
+	public static ExpandedArchive expandToSongDirectoryDetailed(Path archive) throws IOException {
 		Path normalizedArchive = archive.toAbsolutePath().normalize();
 		ArchiveContents contents = readContents(normalizedArchive);
 		if (contents.entries().stream().noneMatch(SongArchives::isChartEntry)) {
@@ -142,9 +153,39 @@ public final class SongArchives {
 				}
 				throw e;
 			}
-			return target;
+			return new ExpandedArchive(normalizedArchive, storedArchive, target);
 		} finally {
 			deleteRecursively(staging);
+		}
+	}
+
+	/**
+	 * Best-effort disk compensation for an expanded archive when an outer
+	 * database transaction fails. Logs warnings instead of throwing so the
+	 * primary exception is never masked.
+	 */
+	public static void rollbackExpandedArchive(ExpandedArchive expanded) {
+		if (expanded == null) {
+			return;
+		}
+		if (expanded.destination() != null && Files.exists(expanded.destination())) {
+			try {
+				deleteRecursively(expanded.destination());
+			} catch (RuntimeException e) {
+				java.util.logging.Logger.getGlobal().log(java.util.logging.Level.WARNING,
+						"Failed to remove expanded archive directory during rollback: " + expanded.destination(), e);
+			}
+		}
+		if (expanded.storedArchive() != null && Files.exists(expanded.storedArchive())
+				&& expanded.originalArchive() != null && !Files.exists(expanded.originalArchive())) {
+			try {
+				move(expanded.storedArchive(), expanded.originalArchive());
+			} catch (IOException | RuntimeException e) {
+				java.util.logging.Logger.getGlobal().log(java.util.logging.Level.WARNING,
+						"Failed to restore moved archive during rollback: " + expanded.storedArchive()
+								+ " -> " + expanded.originalArchive(),
+						e);
+			}
 		}
 	}
 
