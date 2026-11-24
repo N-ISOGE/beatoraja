@@ -80,4 +80,35 @@ public interface SongDatabaseAccessor {
 	 */
 	public void updateSongDatas(String updatepath, String[] bmsroot, boolean updateAll, SongInformationAccessor info);
 
+	/**
+	 * 楽曲データのメタデータ（タイトル、アーティスト、ジャンル等）が破損（Shift_JISモジバケ等）しているかを判定します。
+	 * Checks whether the song metadata contains corrupted encoding (such as legacy Shift_JIS mojibake).
+	 *
+	 * @param song 検査対象の楽曲データ
+	 * @return 破損が検出された場合true
+	 */
+	public default boolean isCorruptedMetadata(SongData song) {
+		return false;
+	}
+
+	/**
+	 * データベース内の破損したメタデータを持つ楽曲リストを検索・取得します。
+	 * Searches and returns a list of songs with corrupted metadata from the database.
+	 *
+	 * @return 破損が検出された楽曲リスト
+	 */
+	public default java.util.List<SongData> findCorruptedSongs() {
+		return java.util.Collections.emptyList();
+	}
+
+	/**
+	 * 破損したメタデータを持つ楽曲を再スキャンし、DBスキーマおよびハッシュを変更せずに修復します。
+	 * Safely rescans songs with corrupted metadata without altering DB schema or hash invariants.
+	 *
+	 * @return 修復された楽曲数
+	 */
+	public default int rescanCorruptedSongs() {
+		return 0;
+	}
+
 }
