@@ -1,5 +1,9 @@
 package bms.player.beatoraja.ir;
 
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 
 import bms.model.Mode;
@@ -32,8 +36,37 @@ final class IRWorkerProtocol {
 	static final String METHOD_GET_PLAYER_URL = "getPlayerURL";
 	static final String METHOD_GET_VERSION_INFO = "getVersionInfo";
 	static final String METHOD_GET_ILLEGAL_SONGS = "getIllegalSongs";
+	static final int MAX_LINE_BYTES = 16 * 1024 * 1024;
 
 	private IRWorkerProtocol() {
+	}
+
+	static String readLine(InputStream in, int maxBytes) throws IOException {
+		ByteArrayOutputStream out = new ByteArrayOutputStream(256);
+		int b;
+		while ((b = in.read()) != -1) {
+			if (b == '\n') {
+				byte[] bytes = out.toByteArray();
+				int len = bytes.length;
+				if (len > 0 && bytes[len - 1] == '\r') {
+					len--;
+				}
+				return new String(bytes, 0, len, StandardCharsets.UTF_8);
+			}
+			if (out.size() >= maxBytes) {
+				throw new IOException("IR IPC line exceeds " + maxBytes + " bytes");
+			}
+			out.write(b);
+		}
+		if (out.size() == 0) {
+			return null;
+		}
+		byte[] bytes = out.toByteArray();
+		int len = bytes.length;
+		if (len > 0 && bytes[len - 1] == '\r') {
+			len--;
+		}
+		return new String(bytes, 0, len, StandardCharsets.UTF_8);
 	}
 
 	/** Only strings cross the discovery boundary; no plugin Class or instance enters the parent JVM. */
