@@ -316,7 +316,8 @@ public final class FontLifetimeTest {
         // The global fallback source stays pooled for the whole program; release it before counting entries.
         SystemFallbackGlyphs.resetGlobalSource(); drain();
         FontGeneratorPool.Lease a=FontGeneratorPool.acquire("font/VL-Gothic-Regular.ttf");
-        FontGeneratorPool.Lease b=FontGeneratorPool.acquire("font\\VL-Gothic-Regular.ttf");
+        FontGeneratorPool.Lease b=FontGeneratorPool.acquire(
+                java.io.File.separatorChar == '\\' ? "font\\VL-Gothic-Regular.ttf" : "font/./VL-Gothic-Regular.ttf");
         check(a.generator()==b.generator() && a.coverage()==b.coverage(), "same snapshot shares native face and coverage");
         try { FontGeneratorPool.clear(); throw new AssertionError("live clear must fail"); }
         catch (IllegalStateException expected) { }
