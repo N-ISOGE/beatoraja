@@ -31,7 +31,32 @@ public final class AudioContainerBoundaryTest {
         signatures();
         wavHeaders();
         disguisedContainer();
+        gdxRuntimeExceptionOnPcmKeySound();
         System.out.println("AudioContainerBoundaryTest passed");
+    }
+
+    private static void gdxRuntimeExceptionOnPcmKeySound() throws Exception {
+        com.badlogic.gdx.Audio oldAudio = com.badlogic.gdx.Gdx.audio;
+        com.badlogic.gdx.Gdx.audio = (com.badlogic.gdx.Audio) java.lang.reflect.Proxy.newProxyInstance(
+                com.badlogic.gdx.Audio.class.getClassLoader(),
+                new Class<?>[] { com.badlogic.gdx.Audio.class },
+                (proxy, method, args) -> {
+                    if ("newSound".equals(method.getName())) {
+                        throw new com.badlogic.gdx.utils.GdxRuntimeException("injected OpenAL failure");
+                    }
+                    return null;
+                });
+        try {
+            GdxSoundDriver driver = new GdxSoundDriver(new bms.player.beatoraja.Config());
+            byte[] wavBytes = wav(1, 1, 44100, 16, new byte[0], 4, bytes(0x11, 0x22, 0x33, 0x44));
+            SongResource wavRes = new MemoryDirectory(Map.of("test.wav", wavBytes)).resolve("test.wav");
+            PCM pcm = PCM.load(wavRes, driver);
+            check(pcm != null, "Test PCM must load");
+            check(driver.getKeySound(pcm) == null,
+                    "getKeySound(PCM) must return null on GdxRuntimeException so model cleanup runs");
+        } finally {
+            com.badlogic.gdx.Gdx.audio = oldAudio;
+        }
     }
 
     private static void siblingPaths() throws Exception {

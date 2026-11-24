@@ -118,17 +118,22 @@ public class GdxSoundDriver extends AbstractAudioDriver<Sound> {
 			source = pcm;
 		}
 
-		return Gdx.audio.newSound(new FileHandleStream("tempwav.wav") {
-			@Override
-			public InputStream read() {
-				return new WavFileInputStream(source);
-			}
+		try {
+			return Gdx.audio.newSound(new FileHandleStream("tempwav.wav") {
+				@Override
+				public InputStream read() {
+					return new WavFileInputStream(source);
+				}
 
-			@Override
-			public OutputStream write(boolean overwrite) {
-				return null;
-			}
-		});
+				@Override
+				public OutputStream write(boolean overwrite) {
+					return null;
+				}
+			});
+		} catch (GdxRuntimeException e) {
+			Logger.getGlobal().warning("音源ファイル読み込み失敗" + e.getMessage());
+		}
+		return null;
 	}
 
 	private Object lock = new Object();
