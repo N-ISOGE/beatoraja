@@ -594,7 +594,7 @@ public class MainLoader extends Application {
 				connection.setReadTimeout(5000);
 				connection.setRequestProperty("Accept", "application/vnd.github+json");
 				connection.setRequestProperty("User-Agent", "beatoraja-version-checker");
-				final String name = getReleaseName(connection);
+				final String name = normalizeVersion(getReleaseName(connection));
 				if (MainController.getVersion().contains(name)) {
 					message = "最新版を利用中です";
 				} else {
@@ -628,16 +628,30 @@ public class MainLoader extends Application {
 			if (root == null || !root.isObject()) {
 				throw new IOException("GitHub release response is not a JSON object");
 			}
-			String candidate = rootString(root, "name");
-			if (candidate == null || candidate.isBlank()) {
-				candidate = rootString(root, "tag_name");
+			String rawName = rootString(root, "name");
+			if (rawName != null && !rawName.isBlank()) {
+				String trimmedName = rawName.trim();
+				if (isSafeVersion(trimmedName)) {
+					return normalizeVersion(trimmedName);
+				}
 			}
-			if (candidate == null) {
-				throw new IOException("GitHub release response does not contain a name or tag_name");
+			String rawTag = rootString(root, "tag_name");
+			if (rawTag != null && !rawTag.isBlank()) {
+				String trimmedTag = rawTag.trim();
+				if (isSafeVersion(trimmedTag)) {
+					return normalizeVersion(trimmedTag);
+				}
 			}
-			String trimmed = candidate.trim();
-			if (!isSafeVersion(trimmed)) {
-				throw new IOException("GitHub release version failed validation");
+			throw new IOException("GitHub release version failed validation");
+		}
+
+		static String normalizeVersion(String version) {
+			if (version == null) {
+				return null;
+			}
+			String trimmed = version.trim();
+			if (trimmed.length() > 1 && (trimmed.charAt(0) == 'v' || trimmed.charAt(0) == 'V')) {
+				return trimmed.substring(1);
 			}
 			return trimmed;
 		}
