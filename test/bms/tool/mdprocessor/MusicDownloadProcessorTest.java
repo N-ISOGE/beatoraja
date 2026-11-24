@@ -8,9 +8,11 @@ import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
@@ -35,6 +37,7 @@ public class MusicDownloadProcessorTest {
         runtimeScanRoots(root.resolve("scan"));
         transferAndHandoff(root.resolve("transfer"));
         extensionlessTarEntries(root.resolve("extensionless-tar"));
+        localhostRedirectAndStall(root.resolve("redirect-stall"));
         diffsAndFailure(root.resolve("diffs"));
         disposeActiveDownload(root.resolve("dispose"));
         System.out.println("D2 IPFS regression passed: input limits, RPC and gateway, FIFO, diffs, failures, disposal");
@@ -183,6 +186,102 @@ public class MusicDownloadProcessorTest {
         } finally {
             processor.dispose();
             server.stop(0);
+        }
+    }
+
+    private static void localhostRedirectAndStall(Path root) throws Exception {
+        Files.createDirectories(root);
+        IpfsTransfer.validateRedirectTarget(
+                URI.create("http://" + CID_V1 + ".ipfs.localhost:8080/ipfs/" + CID_V1), true);
+        expectIo(() -> IpfsTransfer.validateRedirectTarget(URI.create("https://example.com/ipfs/" + CID_V1), true));
+        expectIo(() -> IpfsTransfer.validateRedirectTarget(URI.create("http://127.0.0.1:8080/ipfs/" + CID_V1), false));
+        expectIo(() -> IpfsTransfer.validateRedirectTarget(URI.create("http://10.0.0.1/ipfs/" + CID_V1), false));
+        expectIo(() -> IpfsTransfer.validateRedirectTarget(URI.create("http://user:pass@localhost:8080/"), true));
+
+        byte[] tarPayload = tar("wrapped/chart.bms", false);
+        AtomicInteger hops = new AtomicInteger();
+        HttpServer redirectServer = server();
+        redirectServer.createContext("/ipfs/", exchange -> {
+            String host = exchange.getRequestHeaders().getFirst("Host");
+            String path = exchange.getRequestURI().getPath();
+            int port = redirectServer.getAddress().getPort();
+            if (path.contains("/cross")) {
+                try (exchange) {
+                    exchange.getResponseHeaders().set("Location", "https://example.invalid/ipfs/" + CID_V1);
+                    exchange.sendResponseHeaders(301, -1);
+                }
+            } else if (path.contains("/loop")) {
+                try (exchange) {
+                    exchange.getResponseHeaders().set("Location",
+                            "http://127.0.0.1:" + port + "/ipfs/loop?n=" + hops.incrementAndGet());
+                    exchange.sendResponseHeaders(302, -1);
+                }
+            } else if (host != null && host.toLowerCase(java.util.Locale.ROOT).startsWith("localhost:")) {
+                try (exchange) {
+                    exchange.getResponseHeaders().set("Location",
+                            "http://127.0.0.1:" + port + "/ipfs/" + CID_V1 + "?format=tar");
+                    exchange.sendResponseHeaders(301, -1);
+                }
+            } else if (host != null && host.startsWith("127.0.0.1:")) {
+                reply(exchange, 200, "application/x-tar", tarPayload);
+            } else {
+                reply(exchange, 400, "text/plain", new byte[0]);
+            }
+        });
+        redirectServer.start();
+
+        MusicDownloadProcessor processor = new MusicDownloadProcessor(
+                "http://localhost:" + redirectServer.getAddress().getPort() + "/ipfs",
+                hashes -> new String[0], root.resolve("redirect"));
+        try {
+            processor.start(song(CID_V1, null, "Localhost redirect"));
+            await(() -> processor.getDownloadpath() != null, "localhost -> 127.0.0.1 301 redirect");
+            require(processor.handoff(p -> Files.isRegularFile(Path.of(p).resolve("chart.bms"))),
+                    "redirected chart installed");
+
+            processor.start(song(CID_V1 + "/cross", null, "Cross boundary"));
+            require(awaitFailure(processor).contains("trust boundary"), "cross-boundary redirect rejected");
+
+            processor.start(song(CID_V1 + "/loop", null, "Redirect loop"));
+            require(awaitFailure(processor).contains("redirects"), "excessive redirects rejected");
+        } finally {
+            processor.dispose();
+            redirectServer.stop(0);
+        }
+
+        CountDownLatch releaseHandler = new CountDownLatch(1);
+        HttpServer stallServer = server();
+        stallServer.createContext("/ipfs/", exchange -> {
+            try (exchange) {
+                exchange.sendResponseHeaders(200, 0);
+                exchange.getResponseBody().write(CHART, 0, 1);
+                exchange.getResponseBody().flush();
+                try {
+                    releaseHandler.await(5, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        });
+        stallServer.start();
+        try {
+            IpfsTransfer transfer = new IpfsTransfer(url(stallServer) + "/ipfs", root.resolve("stall"),
+                    Duration.ofMillis(250));
+            long start = System.nanoTime();
+            IOException thrown = null;
+            try {
+                transfer.install(CID + "/stalled.bms", null, null, "Stalled", null, (s, t) -> Files.move(s, t));
+            } catch (IOException e) {
+                thrown = e;
+            }
+            long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+            require(thrown != null && thrown.getMessage().contains("stalled"),
+                    "stalled body aborted with stalled error");
+            require(elapsedMs < 3000, "stalled body aborted promptly: " + elapsedMs + " ms");
+            requireNoStaging(root.resolve("stall"));
+        } finally {
+            releaseHandler.countDown();
+            stallServer.stop(0);
         }
     }
 
