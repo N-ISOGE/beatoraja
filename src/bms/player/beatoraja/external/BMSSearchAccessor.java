@@ -8,11 +8,16 @@ import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.net.http.HttpTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Logger;
 
 import bms.player.beatoraja.song.SongData;
@@ -36,6 +41,17 @@ public class BMSSearchAccessor extends TableDataAccessor.TableAccessor {
 			.connectTimeout(CONNECT_TIMEOUT)
 			.followRedirects(HttpClient.Redirect.NORMAL)
 			.build();
+	private static final ScheduledThreadPoolExecutor BODY_TIMEOUT_SCHEDULER = createBodyTimeoutScheduler();
+
+	private static ScheduledThreadPoolExecutor createBodyTimeoutScheduler() {
+		ScheduledThreadPoolExecutor scheduler = new ScheduledThreadPoolExecutor(1, r -> {
+			Thread t = new Thread(r, "bms-search-http-body-timeout");
+			t.setDaemon(true);
+			return t;
+		});
+		scheduler.setRemoveOnCancelPolicy(true);
+		return scheduler;
+	}
 
 	private final String tabledir;
 	private final String apiBaseUrl;
@@ -154,6 +170,8 @@ public class BMSSearchAccessor extends TableDataAccessor.TableAccessor {
 				|| uri.getHost() == null || uri.getHost().isBlank()) {
 			throw new IOException("Unsupported BMS Search URL scheme: " + url);
 		}
+		long timeoutNanos = Math.max(1L, REQUEST_TIMEOUT.toNanos());
+		long deadlineNanos = System.nanoTime() + timeoutNanos;
 		HttpRequest request = HttpRequest.newBuilder(uri)
 				.timeout(REQUEST_TIMEOUT)
 				.header("User-Agent", "beatoraja")
@@ -170,18 +188,48 @@ public class BMSSearchAccessor extends TableDataAccessor.TableAccessor {
 			if (contentLength > MAX_RESPONSE_BYTES) {
 				throw new IOException("BMS Search response exceeds " + MAX_RESPONSE_BYTES + " bytes");
 			}
-			ByteArrayOutputStream out = new ByteArrayOutputStream();
-			byte[] buffer = new byte[8192];
-			int total = 0;
-			int n;
-			while ((n = body.read(buffer)) != -1) {
-				total += n;
-				if (total > MAX_RESPONSE_BYTES) {
-					throw new IOException("BMS Search response exceeds " + MAX_RESPONSE_BYTES + " bytes");
-				}
-				out.write(buffer, 0, n);
+			long remainingNanos = deadlineNanos - System.nanoTime();
+			if (remainingNanos <= 0L) {
+				throw new HttpTimeoutException("BMS Search response body timed out after " + REQUEST_TIMEOUT + ": " + uri);
 			}
-			return out.toString(StandardCharsets.UTF_8);
+			AtomicBoolean timedOut = new AtomicBoolean(false);
+			ScheduledFuture<?> timeoutTask = BODY_TIMEOUT_SCHEDULER.schedule(() -> {
+				timedOut.set(true);
+				try {
+					body.close();
+				} catch (IOException ignored) {
+				}
+			}, remainingNanos, TimeUnit.NANOSECONDS);
+			try {
+				ByteArrayOutputStream out = new ByteArrayOutputStream();
+				byte[] buffer = new byte[8192];
+				int total = 0;
+				int n;
+				while ((n = body.read(buffer)) != -1) {
+					if (timedOut.get() || System.nanoTime() - deadlineNanos > 0L) {
+						throw new HttpTimeoutException("BMS Search response body timed out after " + REQUEST_TIMEOUT + ": " + uri);
+					}
+					total += n;
+					if (total > MAX_RESPONSE_BYTES) {
+						throw new IOException("BMS Search response exceeds " + MAX_RESPONSE_BYTES + " bytes");
+					}
+					out.write(buffer, 0, n);
+				}
+				if (timedOut.get()) {
+					throw new HttpTimeoutException("BMS Search response body timed out after " + REQUEST_TIMEOUT + ": " + uri);
+				}
+				return out.toString(StandardCharsets.UTF_8);
+			} catch (IOException e) {
+				if (timedOut.get()) {
+					HttpTimeoutException timeoutEx = new HttpTimeoutException(
+							"BMS Search response body timed out after " + REQUEST_TIMEOUT + ": " + uri);
+					timeoutEx.initCause(e);
+					throw timeoutEx;
+				}
+				throw e;
+			} finally {
+				timeoutTask.cancel(false);
+			}
 		}
 	}
 

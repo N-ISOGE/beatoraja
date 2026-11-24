@@ -2,10 +2,15 @@ package bms.player.beatoraja;
 
 import com.sun.net.httpserver.HttpServer;
 import java.net.InetSocketAddress;
+import java.net.http.HttpTimeoutException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.Arrays;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 /** ローカルHTTPと隔離キャッシュで難易度表の契約を確認する。
  * Verify table contracts with loopback HTTP and an isolated cache. */
@@ -17,8 +22,24 @@ public final class TableDataBoundaryTest {
         Set<String> allowed = Set.of("header_test_a.json", "data_test_a.json", "header_only_course.json",
                 "header_partial_success.json", "data_partial_valid.json", "header_broken_data.json");
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        CountDownLatch releaseStall = new CountDownLatch(1);
         server.createContext("/", exchange -> {
             String name = exchange.getRequestURI().getPath().substring(1);
+            if ("stalled_body.json".equals(name)) {
+                exchange.getResponseHeaders().set("Content-Type", "application/json; charset=UTF-8");
+                exchange.sendResponseHeaders(200, 0);
+                try (var stream = exchange.getResponseBody()) {
+                    stream.write("{\"name\":\"stalled\"".getBytes(StandardCharsets.UTF_8));
+                    stream.flush();
+                    try {
+                        releaseStall.await(10, TimeUnit.SECONDS);
+                    } catch (InterruptedException ignored) {
+                        Thread.currentThread().interrupt();
+                    }
+                } catch (Exception ignored) {
+                }
+                return;
+            }
             byte[] bytes = allowed.contains(name) ? Files.readAllBytes(fixtures.resolve(name)) : new byte[0];
             exchange.getResponseHeaders().set("Content-Type", "application/json; charset=UTF-8");
             exchange.sendResponseHeaders(allowed.contains(name) ? 200 : 404, bytes.length);
@@ -53,8 +74,21 @@ public final class TableDataBoundaryTest {
             byte[] previous = Files.readAllBytes(saved);
             accessor.updateTableData(new String[]{broken});
             check(Arrays.equals(previous, Files.readAllBytes(saved)), "all-failed update preserves cache bytes");
-            System.out.println("TableDataBoundaryTest PASS (folder membership/order/drop/remap, course-only, partial success, total-failure cache preservation)");
-        } finally { server.stop(0); }
+            long startNanos = System.nanoTime();
+            boolean timedOut = false;
+            try {
+                TableDataAccessor.fetchRemote(base + "stalled_body.json", Duration.ofMillis(300));
+            } catch (HttpTimeoutException expected) {
+                timedOut = true;
+            }
+            long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+            check(timedOut, "stalled body after 200 headers must throw HttpTimeoutException");
+            check(elapsedMs < 5000, "stalled body timeout took too long: " + elapsedMs + " ms");
+            System.out.println("TableDataBoundaryTest PASS (folder membership/order/drop/remap, course-only, partial success, total-failure cache preservation, stalled-body timeout in " + elapsedMs + " ms)");
+        } finally {
+            releaseStall.countDown();
+            server.stop(0);
+        }
     }
 
     private static TableData read(Path cache, String url) {

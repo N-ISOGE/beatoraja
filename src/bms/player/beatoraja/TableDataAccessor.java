@@ -10,12 +10,17 @@ import java.net.URLStreamHandler;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.net.http.HttpTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.util.*;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.regex.Matcher;
@@ -44,6 +49,17 @@ public class TableDataAccessor {
 			.connectTimeout(HTTP_CONNECT_TIMEOUT)
 			.followRedirects(HttpClient.Redirect.NORMAL)
 			.build();
+	private static final ScheduledThreadPoolExecutor BODY_TIMEOUT_SCHEDULER = createBodyTimeoutScheduler();
+
+	private static ScheduledThreadPoolExecutor createBodyTimeoutScheduler() {
+		ScheduledThreadPoolExecutor scheduler = new ScheduledThreadPoolExecutor(1, r -> {
+			Thread t = new Thread(r, "table-http-body-timeout");
+			t.setDaemon(true);
+			return t;
+		});
+		scheduler.setRemoveOnCancelPolicy(true);
+		return scheduler;
+	}
 	private static final Pattern META_TAG_PATTERN = Pattern.compile("<meta\\b([^>]*)>", Pattern.CASE_INSENSITIVE);
 	private static final Pattern HTML_ATTR_PATTERN = Pattern.compile(
 			"([a-zA-Z_:][-a-zA-Z0-9_:.]*)\\s*=\\s*(?:\"([^\"]*)\"|'([^']*)'|([^\\s\"'=<>`]+))");
@@ -531,10 +547,16 @@ public class TableDataAccessor {
 		return uri;
 	}
 
-	private static RemoteTableResponse fetchRemote(String rawUrl) throws IOException, InterruptedException {
+	static RemoteTableResponse fetchRemote(String rawUrl) throws IOException, InterruptedException {
+		return fetchRemote(rawUrl, HTTP_REQUEST_TIMEOUT);
+	}
+
+	static RemoteTableResponse fetchRemote(String rawUrl, Duration requestTimeout) throws IOException, InterruptedException {
 		URI uri = validateHttpUri(rawUrl);
+		long timeoutNanos = Math.max(1L, requestTimeout.toNanos());
+		long deadlineNanos = System.nanoTime() + timeoutNanos;
 		HttpRequest request = HttpRequest.newBuilder(uri)
-				.timeout(HTTP_REQUEST_TIMEOUT)
+				.timeout(requestTimeout)
 				.header("User-Agent", "beatoraja")
 				.GET()
 				.build();
@@ -548,20 +570,50 @@ public class TableDataAccessor {
 			if (contentLength > MAX_REMOTE_TABLE_BYTES) {
 				throw new IOException("Remote table response exceeds " + MAX_REMOTE_TABLE_BYTES + " bytes: " + uri);
 			}
-			ByteArrayOutputStream out = new ByteArrayOutputStream();
-			byte[] buffer = new byte[8192];
-			int total = 0;
-			int n;
-			while ((n = body.read(buffer)) != -1) {
-				total += n;
-				if (total > MAX_REMOTE_TABLE_BYTES) {
-					throw new IOException("Remote table response exceeds " + MAX_REMOTE_TABLE_BYTES + " bytes: " + uri);
-				}
-				out.write(buffer, 0, n);
+			long remainingNanos = deadlineNanos - System.nanoTime();
+			if (remainingNanos <= 0L) {
+				throw new HttpTimeoutException("HTTP response body timed out after " + requestTimeout + ": " + uri);
 			}
-			URI finalUri = response.uri() != null ? response.uri() : uri;
-			validateHttpUri(finalUri.toASCIIString());
-			return new RemoteTableResponse(finalUri, out.toByteArray());
+			AtomicBoolean timedOut = new AtomicBoolean(false);
+			ScheduledFuture<?> timeoutTask = BODY_TIMEOUT_SCHEDULER.schedule(() -> {
+				timedOut.set(true);
+				try {
+					body.close();
+				} catch (IOException ignored) {
+				}
+			}, remainingNanos, TimeUnit.NANOSECONDS);
+			try {
+				ByteArrayOutputStream out = new ByteArrayOutputStream();
+				byte[] buffer = new byte[8192];
+				int total = 0;
+				int n;
+				while ((n = body.read(buffer)) != -1) {
+					if (timedOut.get() || System.nanoTime() - deadlineNanos > 0L) {
+						throw new HttpTimeoutException("HTTP response body timed out after " + requestTimeout + ": " + uri);
+					}
+					total += n;
+					if (total > MAX_REMOTE_TABLE_BYTES) {
+						throw new IOException("Remote table response exceeds " + MAX_REMOTE_TABLE_BYTES + " bytes: " + uri);
+					}
+					out.write(buffer, 0, n);
+				}
+				if (timedOut.get()) {
+					throw new HttpTimeoutException("HTTP response body timed out after " + requestTimeout + ": " + uri);
+				}
+				URI finalUri = response.uri() != null ? response.uri() : uri;
+				validateHttpUri(finalUri.toASCIIString());
+				return new RemoteTableResponse(finalUri, out.toByteArray());
+			} catch (IOException e) {
+				if (timedOut.get()) {
+					HttpTimeoutException timeoutEx = new HttpTimeoutException(
+							"HTTP response body timed out after " + requestTimeout + ": " + uri);
+					timeoutEx.initCause(e);
+					throw timeoutEx;
+				}
+				throw e;
+			} finally {
+				timeoutTask.cancel(false);
+			}
 		}
 	}
 
