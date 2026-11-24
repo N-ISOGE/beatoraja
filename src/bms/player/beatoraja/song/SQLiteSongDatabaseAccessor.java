@@ -601,19 +601,32 @@ public class SQLiteSongDatabaseAccessor extends SQLiteDatabaseAccessor implement
 					qr.update(conn, "DELETE FROM song WHERE " + dsql.toString(), param);					
 				}
 
-				paths.forEach((p) -> {
-					try {
-						if (scanSongArchives && songArchiveExtractMode == SongArchiveExtractMode.SONG_DIRECTORY) {
-							migrateSongArchives(p, property.conn);
+				List<SongArchives.ExpandedArchive> migratedArchives = new ArrayList<>();
+				try {
+					for (Path p : (Iterable<Path>) paths::iterator) {
+						try {
+							if (scanSongArchives && songArchiveExtractMode == SongArchiveExtractMode.SONG_DIRECTORY) {
+								migrateSongArchives(p, property.conn, migratedArchives);
+							}
+							BMSFolder folder = scanDirectory(p);
+							folder.processDirectory(property);
+						} catch (IOException | IllegalArgumentException | ReflectiveOperationException | IntrospectionException e) {
+							Logger.getGlobal().severe("楽曲データベース更新時の例外:" + e.getMessage());
 						}
-						BMSFolder folder = scanDirectory(p);
-						folder.processDirectory(property);
-					} catch (IOException | SQLException | IllegalArgumentException | ReflectiveOperationException | IntrospectionException e) {
-						Logger.getGlobal().severe("楽曲データベース更新時の例外:" + e.getMessage());
 					}
-				});
-				property.flush();
-				conn.commit();
+					property.flush();
+					conn.commit();
+				} catch (Exception e) {
+					try {
+						conn.rollback();
+					} catch (SQLException rollbackEx) {
+						Logger.getGlobal().log(java.util.logging.Level.WARNING, "Failed to rollback song database update", rollbackEx);
+					}
+					for (int i = migratedArchives.size() - 1; i >= 0; i--) {
+						SongArchives.rollbackExpandedArchive(migratedArchives.get(i));
+					}
+					throw e;
+				}
 			} catch (Exception e) {
 				Logger.getGlobal().severe("楽曲データベース更新時の例外:" + e.getMessage());
 				e.printStackTrace();
@@ -690,7 +703,8 @@ public class SQLiteSongDatabaseAccessor extends SQLiteDatabaseAccessor implement
 			return rootFolder;
 		}
 
-		private void migrateSongArchives(Path start, Connection conn) throws IOException, SQLException {
+		private void migrateSongArchives(Path start, Connection conn,
+				List<SongArchives.ExpandedArchive> migratedArchives) throws IOException, SQLException {
 			List<Path> archives = new ArrayList<>();
 			Files.walkFileTree(start, new SimpleFileVisitor<Path>() {
 				@Override
@@ -721,12 +735,14 @@ public class SQLiteSongDatabaseAccessor extends SQLiteDatabaseAccessor implement
 					// 失敗し得るSQLを移動前に実行し、展開失敗なら戻す。
 					// Finish fallible SQL before moving the archive; roll it back if extraction fails.
 					deleteArchiveRecords(conn, normalizedArchive);
-					Path destination = SongArchives.expandToSongDirectory(normalizedArchive);
-					Logger.getGlobal().info("楽曲アーカイブを展開しました : " + archive + " -> " + destination);
+					SongArchives.ExpandedArchive expanded = SongArchives.expandToSongDirectoryDetailed(normalizedArchive);
+					migratedArchives.add(expanded);
+					Logger.getGlobal().info("楽曲アーカイブを展開しました : " + archive + " -> " + expanded.destination());
 				} catch (IOException e) {
 					conn.rollback(migration);
+					Logger.getGlobal().log(java.util.logging.Level.WARNING, "Archive migration rolled back: " + archive, e);
 					Logger.getGlobal().warning("楽曲アーカイブ展開失敗:" + archive + " : " + e.getMessage());
-				} catch (SQLException e) {
+				} catch (SQLException | RuntimeException e) {
 					conn.rollback(migration);
 					throw e;
 				} finally {
@@ -1153,24 +1169,31 @@ public class SQLiteSongDatabaseAccessor extends SQLiteDatabaseAccessor implement
 		}
 
 		private void addArchiveFiles(Path archive, SongArchives.ArchiveContents contents) {
+			int skipped = 0;
 			for (String entry : contents.entries()) {
-				if (isHiddenEntry(entry)) {
+				if (isHiddenEntry(entry) || (contents.rootDirectory() != null && !entry.startsWith(contents.rootDirectory() + "/"))) {
 					continue;
 				}
-				if (contents.rootDirectory() != null && !entry.startsWith(contents.rootDirectory() + "/")) {
-					continue;
+				try {
+					String filename = Path.of(entry).getFileName().toString();
+					Path chart = SongArchives.isChartEntry(entry)
+							? SongArchives.virtualPath(archive, entry, contents.rootDirectory()) : null;
+					String lower = filename.toLowerCase(Locale.ROOT);
+					txt |= lower.endsWith(".txt");
+					archiveEntries.add(entry.toLowerCase(Locale.ROOT));
+					if (previewpath == null && isPreviewFile(lower)) {
+						previewpath = filename;
+					}
+					if (chart != null) {
+						bmsfiles.add(new ChartFile(chart, lastModifiedTime));
+					}
+				} catch (java.nio.file.InvalidPathException e) {
+					skipped++;
+					Logger.getGlobal().log(java.util.logging.Level.FINE, "Invalid chart archive entry in " + archive, e);
 				}
-				String filename = Path.of(entry).getFileName().toString().toLowerCase(Locale.ROOT);
-				if (!txt && filename.endsWith(".txt")) {
-					txt = true;
-				}
-				archiveEntries.add(entry.toLowerCase(Locale.ROOT));
-				if (previewpath == null && isPreviewFile(filename)) {
-					previewpath = Path.of(entry).getFileName().toString();
-				}
-				if (SongArchives.isChartEntry(entry)) {
-					bmsfiles.add(new ChartFile(SongArchives.virtualPath(archive, entry, contents.rootDirectory()), lastModifiedTime));
-				}
+			}
+			if (skipped != 0) {
+				Logger.getGlobal().warning("Chart archive entries skipped: count=" + skipped + ", archive=" + archive);
 			}
 		}
 
@@ -1407,28 +1430,9 @@ public class SQLiteSongDatabaseAccessor extends SQLiteDatabaseAccessor implement
 
 		private BMSModel decode(Path path, String pathname) {
 			try {
-				if (pathname.toLowerCase(Locale.ROOT).endsWith(".bmson")) {
-					SongResource resource = SongResources.fromPath(path);
-					ChartSource source = new ChartSource() {
-						@Override
-						public String location() {
-							return resource.displayPath();
-						}
-
-						@Override
-						public java.io.InputStream openStream() throws IOException {
-							return resource.openStream();
-						}
-					};
-					return new BMSONDecoder(BMSModel.LNTYPE_LONGNOTE)
-							.decode(new ChartInformation(source, BMSModel.LNTYPE_LONGNOTE, null));
-				}
-				if (SongArchives.isVirtualPath(path)) {
-					return new ExtendedBMSDecoder(BMSModel.LNTYPE_LONGNOTE).decode(SongArchives.readEntry(path), false, null);
-				}
-				return new ExtendedBMSDecoder(BMSModel.LNTYPE_LONGNOTE).decode(path);
+				return decodeChart(path);
 			} catch (Exception | LinkageError e) {
-				Logger.getGlobal().severe("Error while decoding chart at path: " + pathname + e.getMessage());
+				Logger.getGlobal().log(java.util.logging.Level.WARNING, "Error while decoding chart: " + pathname, e);
 				return null;
 			}
 		}
@@ -1624,17 +1628,34 @@ public class SQLiteSongDatabaseAccessor extends SQLiteDatabaseAccessor implement
 		}
 	}
 
+	private BMSModel decodeChart(Path path) throws IOException {
+		SongResource resource = SongResources.fromPath(path);
+		if (!resource.exists()) {
+			return null;
+		}
+		ChartSource source = new ChartSource() {
+			@Override
+			public String location() {
+				return resource.displayPath();
+			}
+
+			@Override
+			public java.io.InputStream openStream() throws IOException {
+				return resource.openStream();
+			}
+		};
+		return ExtendedBMSDecoder.getDecoder(source, BMSModel.LNTYPE_LONGNOTE)
+				.decode(new ChartInformation(source, BMSModel.LNTYPE_LONGNOTE, null));
+	}
+
+	private static boolean corruptedField(String value) {
+		return ExtendedBMSDecoder.containsMojibake(value) || ExtendedBMSDecoder.isLegacyShiftJisMojibake(value);
+	}
+
 	@Override
 	public boolean isCorruptedMetadata(SongData song) {
-		if (song == null) {
-			return false;
-		}
-		return ExtendedBMSDecoder.isLegacyShiftJisMojibake(song.getTitle())
-				|| ExtendedBMSDecoder.isLegacyShiftJisMojibake(song.getArtist())
-				|| ExtendedBMSDecoder.isLegacyShiftJisMojibake(song.getGenre())
-				|| ExtendedBMSDecoder.containsMojibake(song.getTitle())
-				|| ExtendedBMSDecoder.containsMojibake(song.getArtist())
-				|| ExtendedBMSDecoder.containsMojibake(song.getGenre());
+		return song != null && (corruptedField(song.getTitle()) || corruptedField(song.getSubtitle())
+				|| corruptedField(song.getArtist()) || corruptedField(song.getSubartist()) || corruptedField(song.getGenre()));
 	}
 
 	@Override
@@ -1660,70 +1681,55 @@ public class SQLiteSongDatabaseAccessor extends SQLiteDatabaseAccessor implement
 	@Override
 	public int rescanCorruptedSongs() {
 		List<SongData> corrupted = findCorruptedSongs();
-		if (corrupted == null || corrupted.isEmpty()) {
+		if (corrupted.isEmpty()) {
 			return 0;
 		}
 		int repaired = 0;
-		ExtendedBMSDecoder decoder = new ExtendedBMSDecoder(BMSModel.LNTYPE_LONGNOTE);
+		int unavailable = 0;
+		int writeFailures = 0;
 		for (SongData song : corrupted) {
-			if (song.getPath() == null) {
-				continue;
-			}
-			String oldTitle = song.getTitle();
-			String oldArtist = song.getArtist();
-			String oldGenre = song.getGenre();
-			String newTitle = null;
-			String newArtist = null;
-			String newGenre = null;
-
-			Path chartPath = Paths.get(song.getPath());
-			if (!Files.exists(chartPath)) {
-				chartPath = root.resolve(song.getPath());
-			}
-			if (Files.exists(chartPath)) {
+			String path = song.getPath();
+			BMSModel model = null;
+			if (path != null) {
 				try {
-					BMSModel model = decoder.decode(chartPath);
-					if (model != null && model.getTitle() != null && !model.getTitle().isEmpty()) {
-						newTitle = model.getTitle();
-						newArtist = model.getArtist() != null ? model.getArtist() : oldArtist;
-						newGenre = model.getGenre() != null ? model.getGenre() : oldGenre;
-					}
+					model = decodeChart(root.resolve(path));
 				} catch (Exception e) {
-					Logger.getGlobal().warning("Failed to decode corrupted song at " + song.getPath() + ": " + e.getMessage());
+					Logger.getGlobal().log(java.util.logging.Level.FINE, "Unable to read chart for metadata repair: " + path, e);
 				}
 			}
-
-			// ファイルから値を得られない場合は、既知の従来Shift_JISパターンから復旧を試みる。
-			// If decoding yields no value, try recovery from known legacy Shift_JIS patterns.
-			if (newTitle == null && ExtendedBMSDecoder.isLegacyShiftJisMojibake(oldTitle)) {
-				newTitle = ExtendedBMSDecoder.tryRecoverShiftJisMojibake(oldTitle);
+			if (model == null) {
+				unavailable++;
+				// Leave ambiguous text, including valid half-width kana, for a source-backed repair.
+				continue;
 			}
-			if (newArtist == null && ExtendedBMSDecoder.isLegacyShiftJisMojibake(oldArtist)) {
-				newArtist = ExtendedBMSDecoder.tryRecoverShiftJisMojibake(oldArtist);
+			String[] previous = {
+					song.getTitle(), song.getSubtitle(), song.getArtist(), song.getSubartist(), song.getGenre()
+			};
+			String[] source = {
+					model.getTitle(), model.getSubTitle(), model.getArtist(), model.getSubArtist(), model.getGenre()
+			};
+			String[] replacement = previous.clone();
+			for (int i = 0; i < previous.length; i++) {
+				if (corruptedField(previous[i]) && source[i] != null && !source[i].isBlank()
+						&& !ExtendedBMSDecoder.containsMojibake(source[i])) {
+					replacement[i] = source[i];
+				}
 			}
-			if (newGenre == null && ExtendedBMSDecoder.isLegacyShiftJisMojibake(oldGenre)) {
-				newGenre = ExtendedBMSDecoder.tryRecoverShiftJisMojibake(oldGenre);
-			}
-
-			String repairedTitle = newTitle != null ? newTitle : oldTitle;
-			String repairedArtist = newArtist != null ? newArtist : oldArtist;
-			String repairedGenre = newGenre != null ? newGenre : oldGenre;
-			if (!java.util.Objects.equals(repairedTitle, oldTitle)
-					|| !java.util.Objects.equals(repairedArtist, oldArtist)
-					|| !java.util.Objects.equals(repairedGenre, oldGenre)) {
+			if (!Arrays.equals(previous, replacement)) {
 				try {
-					qr.update("UPDATE song SET title = ?, artist = ?, genre = ? WHERE path = ?",
-							repairedTitle, repairedArtist, repairedGenre,
-							song.getPath());
-					repaired++;
+					repaired += qr.update("UPDATE song SET title = ?, subtitle = ?, artist = ?, subartist = ?, genre = ? WHERE path = ?",
+							replacement[0], replacement[1], replacement[2], replacement[3], replacement[4], path);
 				} catch (SQLException e) {
-					Logger.getGlobal().warning("Failed to update repaired song in database: " + e.getMessage());
+					writeFailures++;
+					Logger.getGlobal().log(java.util.logging.Level.WARNING, "Unable to save repaired song metadata: " + path, e);
 				}
 			}
 		}
+		Logger.getGlobal().info("Song metadata repair: examined=" + corrupted.size() + ", repaired=" + repaired
+				+ ", unavailable=" + unavailable + ", writeFailures=" + writeFailures);
 		return repaired;
 	}
-	
+
 	public static interface SongDatabaseAccessorPlugin {
 		
 		public void update(BMSModel model, SongData song);

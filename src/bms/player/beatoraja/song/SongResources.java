@@ -7,11 +7,12 @@ import java.net.HttpURLConnection;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.FutureTask;
 
 import bms.player.beatoraja.song.archive.SongArchives;
 
@@ -19,6 +20,7 @@ import bms.player.beatoraja.song.archive.SongArchives;
 public final class SongResources {
 
 	private static final Map<String, Path> MATERIALIZED = new ConcurrentHashMap<>();
+	private static final Map<String, FutureTask<Path>> COPYING = new ConcurrentHashMap<>();
 
 	/** Point-in-time summary of archive/remote files materialized for Path-only APIs. */
 	public record MaterializedStatistics(int fileCount, long totalBytes) {
@@ -57,25 +59,71 @@ public final class SongResources {
 		if (localPath.isPresent()) {
 			return localPath.get();
 		}
-		Path cached = MATERIALIZED.get(resource.cacheKey());
+		String key = resource.cacheKey();
+		Path cached = MATERIALIZED.get(key);
 		if (cached != null && Files.isRegularFile(cached)) {
 			return cached;
 		}
-		synchronized (MATERIALIZED) {
-			cached = MATERIALIZED.get(resource.cacheKey());
-			if (cached != null && Files.isRegularFile(cached)) {
-				return cached;
+		FutureTask<Path> candidate = new FutureTask<>(() -> copyResource(resource, key));
+		FutureTask<Path> task = COPYING.putIfAbsent(key, candidate);
+		if (task == null) {
+			task = candidate;
+			try {
+				task.run();
+			} finally {
+				COPYING.remove(key, task);
 			}
-			String suffix = extensionSuffix(resource.name());
-			Path target = Files.createTempFile("beatoraja-song-resource-", suffix);
-			try (InputStream input = resource.openStream()) {
-				Files.copy(input, target, StandardCopyOption.REPLACE_EXISTING);
-			} catch (IOException | RuntimeException e) {
-				Files.deleteIfExists(target);
-				throw e;
+		}
+		try {
+			return task.get();
+		} catch (InterruptedException e) {
+			Thread.currentThread().interrupt();
+			throw new IOException("Interrupted while materializing " + resource.name(), e);
+		} catch (ExecutionException e) {
+			if (e.getCause() instanceof IOException failure) {
+				throw failure;
 			}
-			MATERIALIZED.put(resource.cacheKey(), target);
+			if (e.getCause() instanceof RuntimeException failure) {
+				throw failure;
+			}
+			if (e.getCause() instanceof Error failure) {
+				throw failure;
+			}
+			throw new IOException("Unable to materialize " + resource.name(), e.getCause());
+		}
+	}
+
+	private static Path copyResource(SongResource resource, String key) throws IOException {
+		Path cached = MATERIALIZED.get(key);
+		if (cached != null && Files.isRegularFile(cached)) {
+			return cached;
+		}
+		long limit = SongArchives.isChartEntry(resource.name()) ? 64L * 1024 * 1024 : 512L * 1024 * 1024;
+		Path target = Files.createTempFile("beatoraja-song-resource-", extensionSuffix(resource.name()));
+		try {
+			try (InputStream input = resource.openStream(); var output = Files.newOutputStream(target)) {
+				byte[] buffer = new byte[8192];
+				long remaining = limit;
+				int count;
+				while ((count = input.read(buffer, 0, (int) Math.min(buffer.length, remaining + 1))) != -1) {
+					if ((remaining -= count) < 0) {
+						throw new IOException("Song resource exceeds the size limit: " + resource.name());
+					}
+					output.write(buffer, 0, count);
+				}
+			}
+			if (!key.equals(resource.cacheKey())) {
+				throw new IOException("Song resource changed during materialization: " + resource.name());
+			}
+			MATERIALIZED.put(key, target);
 			return target;
+		} catch (IOException | RuntimeException e) {
+			try {
+				Files.deleteIfExists(target);
+			} catch (IOException cleanupFailure) {
+				e.addSuppressed(cleanupFailure);
+			}
+			throw e;
 		}
 	}
 

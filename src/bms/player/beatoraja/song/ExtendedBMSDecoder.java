@@ -25,6 +25,10 @@ public class ExtendedBMSDecoder extends BMSDecoder {
 	private static final Pattern CHARSET_PATTERN = Pattern.compile(
 			"(?im)^[ \\t]*#[ \\t]*CHARSET[ \\t:]+[\"']?([a-zA-Z0-9_\\-]+)[\"']?");
 
+	private static final Pattern UTF16_HEADER = Pattern.compile(
+			"^[ \\t\\r\\n]*#[ \\t]*(?:[A-Za-z][A-Za-z0-9]*|[0-9]+)(?=[: \\t\\r\\n]|$)");
+	private static final Pattern FIRST_CHANNEL = Pattern.compile("(?m)^[ \\t]*#[ \\t]*[0-9]{3}[0-9A-Za-z]{2}[ \\t]*:");
+
 	private static final ThreadLocal<CharsetEncoder> EUC_KR_ENCODER =
 			ThreadLocal.withInitial(() -> Charset.forName("EUC-KR").newEncoder());
 
@@ -241,30 +245,32 @@ public class ExtendedBMSDecoder extends BMSDecoder {
 		return scoreMs949VsMs932(data, effectiveLength);
 	}
 
-	/** ASCII BMSヘッダーの整列と妥当なUTF-16本文を必要とする。
-	 * Requires an aligned ASCII BMS header and a well-formed UTF-16 payload. */
+	/** Requires an aligned ASCII BMS directive and well-formed UTF-16. */
 	private static String detectBomlessUtf16(byte[] data, int length) {
-		if (length < 8 || (length & 1) != 0) {
+		if (length < 4 || (length & 1) != 0) {
 			return null;
 		}
-		boolean littleEndian = data[0] == '#' && data[1] == 0;
-		if (!littleEndian && !(data[0] == 0 && data[1] == '#')) {
-			return null;
-		}
-		int asciiOffset = littleEndian ? 0 : 1;
-		for (int i = 2; i < 8; i += 2) {
-			int c = data[i + asciiOffset];
-			if (data[i + 1 - asciiOffset] != 0 || !(c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z')) {
-				return null;
+		for (int offset = 0; offset < 2; offset++) {
+			int position = 0;
+			while (position < length && data[position + 1 - offset] == 0
+					&& (data[position + offset] == ' ' || data[position + offset] == '\t'
+							|| data[position + offset] == '\r' || data[position + offset] == '\n')) {
+				position += 2;
+			}
+			if (position >= length || data[position + offset] != '#' || data[position + 1 - offset] != 0) {
+				continue;
+			}
+			Charset charset = offset == 0 ? StandardCharsets.UTF_16LE : StandardCharsets.UTF_16BE;
+			try {
+				CharBuffer decoded = charset.newDecoder().decode(ByteBuffer.wrap(data, 0, length));
+				if (UTF16_HEADER.matcher(decoded).find()) {
+					return charset.name();
+				}
+			} catch (CharacterCodingException e) {
+				// Try the other byte order.
 			}
 		}
-		Charset charset = littleEndian ? StandardCharsets.UTF_16LE : StandardCharsets.UTF_16BE;
-		try {
-			charset.newDecoder().decode(ByteBuffer.wrap(data, 0, length));
-			return charset.name();
-		} catch (CharacterCodingException e) {
-			return null;
-		}
+		return null;
 	}
 
 	private static String detectBOM(byte[] data, int length) {
@@ -289,8 +295,12 @@ public class ExtendedBMSDecoder extends BMSDecoder {
 	private static String detectExplicitCharset(byte[] data, int length) {
 		int scanLen = Math.min(length, 16384);
 		String asciiPrefix = new String(data, 0, scanLen, StandardCharsets.ISO_8859_1);
+		Matcher channel = FIRST_CHANNEL.matcher(asciiPrefix);
 		Matcher matcher = CHARSET_PATTERN.matcher(asciiPrefix);
-		if (matcher.find()) {
+		if (channel.find()) {
+			matcher.region(0, channel.start());
+		}
+		while (matcher.find()) {
 			String raw = matcher.group(1).trim();
 			String normalized = normalizeCharsetName(raw);
 			if (normalized != null) {
@@ -335,26 +345,11 @@ public class ExtendedBMSDecoder extends BMSDecoder {
 
 	private static String testUtf8(byte[] data, int length) {
 		try {
-			CharsetDecoder decoder = StandardCharsets.UTF_8.newDecoder()
-					.onMalformedInput(CodingErrorAction.REPORT)
-					.onUnmappableCharacter(CodingErrorAction.REPORT);
-			ByteBuffer bb = ByteBuffer.wrap(data, 0, length);
-			CharBuffer cb = decoder.decode(bb);
-			boolean hasNonAscii = false;
-			for (int i = 0; i < cb.length(); i++) {
-				if (cb.charAt(i) > 0x7F) {
-					hasNonAscii = true;
-					break;
-				}
-			}
-			// 非ASCII文字を含むか、全ASCII文字で正常にUTF-8デコードできた場合はUTF-8と判定
-			// If it decodes cleanly with non-ASCII or is pure ASCII, treat as UTF-8
-			if (hasNonAscii) {
-				return "UTF-8";
-			}
-		} catch (CharacterCodingException ignored) {
+			StandardCharsets.UTF_8.newDecoder().decode(ByteBuffer.wrap(data, 0, length));
+			return "UTF-8";
+		} catch (CharacterCodingException e) {
+			return null;
 		}
-		return null;
 	}
 
 	private static String scoreMs949VsMs932(byte[] data, int length) {
@@ -494,11 +489,9 @@ public class ExtendedBMSDecoder extends BMSDecoder {
 			for (int i = 0; i < minLen; i++) {
 				if (data[i] == reencoded[i]) {
 					matchCount++;
-				} else {
-					break;
 				}
 			}
-			return matchCount > length - 4;
+			return reencoded.length == length && matchCount == length;
 		} catch (Exception e) {
 			return false;
 		}
@@ -527,117 +520,6 @@ public class ExtendedBMSDecoder extends BMSDecoder {
 		}
 	}
 
-	private static int evaluateKorean(String text) {
-		int score = 0;
-		int totalHangulSyllables = 0;
-		String[] lines = text.split("\\r?\\n", -1);
-		for (String line : lines) {
-			String trimmed = line.trim();
-			if (trimmed.isEmpty()) {
-				continue;
-			}
-			boolean isHeader = isBmsTextHeader(trimmed);
-			int multiplier = isHeader ? 5 : 1;
-
-			int consecutiveHangul = 0;
-			for (int i = 0; i < trimmed.length();) {
-				int cp = trimmed.codePointAt(i);
-				i += Character.charCount(cp);
-				if (cp >= 0xAC00 && cp <= 0xD7A3) { // ハングル音節 / Hangul syllables
-					if (isStandardHangul((char) cp)) {
-						// KS X 1001の標準音節 / Standard KS X 1001 syllable
-						totalHangulSyllables++;
-						consecutiveHangul++;
-						score += 20 * multiplier;
-						if (consecutiveHangul >= 2) {
-							score += 10 * multiplier; // 連続するハングルを加点 / Consecutive Hangul bonus
-						}
-					} else {
-						// 拡張音節はShift-JISバイトをCP949で誤読した場合にも生じる。
-						// Extended syllables can also arise when Shift-JIS bytes are misread as CP949.
-						consecutiveHangul = 0;
-						score -= 10 * multiplier;
-					}
-				} else {
-					consecutiveHangul = 0;
-					if ((cp >= 0x3131 && cp <= 0x318E) || (cp >= 0x1100 && cp <= 0x11FF)) { // ハングル字母 / Hangul Jamo
-						score += 5 * multiplier;
-					} else if (cp == 0xFFFD) { // 置換・エラー文字として扱う / Replacement or error character
-						score -= 20 * multiplier;
-					}
-				}
-			}
-		}
-		// 孤立したハングル音節が一つだけなら、Shift-JISの偶然一致を考慮して加点を制限する。
-		// Cap the score for one isolated Hangul syllable to reduce accidental Shift-JIS matches.
-		if (totalHangulSyllables <= 1 && score > 0) {
-			score = Math.min(score, 10);
-		}
-		return score;
-	}
-
-	private static int evaluateJapanese(String text) {
-		int score = 0;
-		int halfWidthKatakanaCount = 0;
-		int fullWidthKatakanaCount = 0;
-		int hiraganaCount = 0;
-		int kanjiCount = 0;
-
-		String[] lines = text.split("\\r?\\n", -1);
-		for (String line : lines) {
-			String trimmed = line.trim();
-			if (trimmed.isEmpty()) {
-				continue;
-			}
-			boolean isHeader = isBmsTextHeader(trimmed);
-			int multiplier = isHeader ? 5 : 1;
-
-			for (int i = 0; i < trimmed.length();) {
-				int cp = trimmed.codePointAt(i);
-				i += Character.charCount(cp);
-				if (cp >= 0x3040 && cp <= 0x309F) { // ひらがな / Hiragana
-					hiraganaCount++;
-					score += 30 * multiplier;
-				} else if (cp >= 0x30A0 && cp <= 0x30FF) { // 全角カタカナ / Full-width Katakana
-					fullWidthKatakanaCount++;
-					score += 20 * multiplier;
-				} else if ((cp >= 0x4E00 && cp <= 0x9FFF) || (cp >= 0x3400 && cp <= 0x4DBF) || (cp >= 0xF900 && cp <= 0xFAFF)
-						|| (cp >= 0x20000 && cp <= 0x2FA1F) || (cp >= 0x30000 && cp <= 0x323AF)) { // 漢字・拡張漢字・互換漢字 (CJK Unified Ideographs, Ext A-I, Compatibility Ideographs)
-					kanjiCount++;
-				} else if (cp >= 0xFF61 && cp <= 0xFF9F) { // 半角カタカナ / Half-width Katakana
-					halfWidthKatakanaCount++;
-					score += 20 * multiplier; // ヘッダーの重みを適用 / Apply the header multiplier
-				} else if (cp == 0xFFFD) {
-					score -= 20 * multiplier;
-				}
-			}
-		}
-
-		// 漢字は平仮名または全角片仮名が存在する場合に正規の日本語スコアとして加算
-		// Kanji adds to Japanese score when accompanied by Hiragana or Full-width Katakana
-		if (hiraganaCount > 0 || fullWidthKatakanaCount > 0) {
-			score += kanjiCount * 10;
-		}
-
-		// 平仮名·全角カタカナがなく、漢字と半角カタカナのみ混在する場合: CP949韓国語がSJIS解釈された典型的なモジバケ (例: ｹ翩ﾏｴﾃﾀﾇ)
-		// If Kanji and Half-width Katakana coexist without ANY Hiragana or Full-width Katakana, it is 100% typical CP949 mojibake
-		if (hiraganaCount == 0 && fullWidthKatakanaCount == 0 && kanjiCount > 0 && halfWidthKatakanaCount > 0) {
-			score = Math.min(score - 1000, -100); // 決定的なモジバケペナルティ (Decisive mojibake penalty)
-		}
-
-		return score;
-	}
-
-	private static boolean isBmsTextHeader(String line) {
-		if (!line.startsWith("#")) {
-			return false;
-		}
-		String upper = line.toUpperCase(Locale.ROOT);
-		return upper.startsWith("#TITLE") || upper.startsWith("#ARTIST")
-				|| upper.startsWith("#SUBTITLE") || upper.startsWith("#SUBARTIST")
-				|| upper.startsWith("#GENRE") || upper.startsWith("#COMMENT");
-	}
-
 	/**
 	 * 文字列がレガシーShift_JISモジバケ（韓国語EUC-KR/CP949がShift_JISとして誤解釈されたパターン）であるかを判定します。
 	 * Checks whether the given text exhibits typical legacy Shift_JIS mojibake patterns
@@ -652,77 +534,10 @@ public class ExtendedBMSDecoder extends BMSDecoder {
 		if (text == null || text.isEmpty()) {
 			return false;
 		}
-		int halfWidthKana = 0;
-		int puaCount = 0;
-		int replacementCount = 0;
-		int hiraganaCount = 0;
-		int fullWidthKana = 0;
-		int kanjiCount = 0;
-		int consecutiveHalfWidthKana = 0;
-		int maxConsecutiveHalfWidthKana = 0;
-		int hangulCount = 0;
-
-		for (int i = 0; i < text.length(); ) {
-			int cp = text.codePointAt(i);
-			i += Character.charCount(cp);
-
-			if (cp >= 0xAC00 && cp <= 0xD7A3) {
-				hangulCount++;
-			} else if (cp >= 0xFF61 && cp <= 0xFF9F) {
-				halfWidthKana++;
-				consecutiveHalfWidthKana++;
-				if (consecutiveHalfWidthKana > maxConsecutiveHalfWidthKana) {
-					maxConsecutiveHalfWidthKana = consecutiveHalfWidthKana;
-				}
-			} else {
-				consecutiveHalfWidthKana = 0;
-				if (cp >= 0x3041 && cp <= 0x3096) {
-					hiraganaCount++;
-				} else if ((cp >= 0x30A1 && cp <= 0x30FA) && cp != 0x30FB) {
-					fullWidthKana++;
-				} else if ((cp >= 0x4E00 && cp <= 0x9FFF) || (cp >= 0x3400 && cp <= 0x4DBF) || (cp >= 0xF900 && cp <= 0xFAFF)) {
-					kanjiCount++;
-				} else if (cp >= 0xE000 && cp <= 0xF8FF) {
-					puaCount++;
-				} else if (cp == 0xFFFD || cp == 0x30FB) {
-					replacementCount++;
-				}
-			}
-		}
-
-		// ひらがな・全角カタカナを含む日本語を韓国語の誤読として扱わない。
-		// Do not treat Japanese containing Hiragana or full-width Katakana as misdecoded Korean.
-		if (hiraganaCount > 0 || fullWidthKana > 0) {
-			return false;
-		}
-
-		// 既に通常のハングル音節を含む / Already contains normal Hangul syllables
-		if (hangulCount > 0 && halfWidthKana == 0 && puaCount == 0 && replacementCount == 0) {
-			return false;
-		}
-
-		// パターン1: 日本語の指標がなく、半角カタカナが二文字以上連続する場合。
-		// Pattern 1: at least two consecutive half-width Katakana without Japanese markers.
-		if (maxConsecutiveHalfWidthKana >= 2 && (halfWidthKana >= 2 || puaCount > 0 || replacementCount > 0)) {
-			// ハングルの往復変換で復旧を確認する / Check recovery with a Hangul round trip
-			if (canRecoverToHangul(text)) {
-				return true;
-			}
-			// 往復変換が部分的でも、かな・漢字の指標がない半角カナ連続を強い文字化け指標として扱う。
-			// The existing heuristic treats consecutive half-width Kana without other Kana/Kanji as strong mojibake evidence.
-			if (halfWidthKana >= 2 || puaCount > 0 || replacementCount > 0) {
-				return true;
-			}
-		}
-
-		// パターン2: PUA・置換文字と半角カナまたは漢字が混在する場合。
-		// Pattern 2: PUA or replacement characters mixed with half-width Kana or Kanji.
-		if ((puaCount > 0 || replacementCount > 0) && (halfWidthKana > 0 || kanjiCount > 0)) {
-			return true;
-		}
-
-		// パターン3: 往復変換で直接確認する / Pattern 3: direct round-trip recovery check
-		return canRecoverToHangul(text);
+		boolean japaneseKana = text.codePoints().anyMatch(c ->
+				(c >= 0x3041 && c <= 0x3096) || (c >= 0x30A1 && c <= 0x30FA && c != 0x30FB));
+		boolean ambiguousHalfWidth = text.codePoints().allMatch(c -> c < 0x80 || (c >= 0xFF61 && c <= 0xFF9F));
+		return !japaneseKana && !ambiguousHalfWidth && canRecoverToHangul(text);
 	}
 
 	/**

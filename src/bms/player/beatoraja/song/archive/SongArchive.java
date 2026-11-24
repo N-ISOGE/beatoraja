@@ -2,13 +2,19 @@ package bms.player.beatoraja.song.archive;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.FilterInputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.file.Files;
+import java.nio.file.FileAlreadyExistsException;
+import java.nio.file.LinkOption;
+import java.text.Normalizer;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
+import java.util.Set;
 
 /**
  * Base class for a song archive format. Implementations provide archive-format
@@ -18,6 +24,7 @@ public abstract class SongArchive {
 
 	protected static final long MAX_EXTRACTED_SIZE = 4L * 1024 * 1024 * 1024;
 	protected static final long MAX_CHART_SIZE = 64L * 1024 * 1024;
+	protected static final long MAX_MEDIA_SIZE = 512L * 1024 * 1024;
 	protected static final int MAX_ENTRY_COUNT = 100_000;
 
 	private final List<String> extensions;
@@ -68,20 +75,111 @@ public abstract class SongArchive {
 		if (normalized.isEmpty() || normalized.startsWith("/") || normalized.contains("//")) {
 			return null;
 		}
-		for (String component : normalized.split("/")) {
-			if (component.equals(".") || component.equals("..") || component.isEmpty()) {
+		for (String component : normalized.split("/", -1)) {
+			if (component.equals(".") || component.equals("..") || component.isEmpty() || component.endsWith(".")
+					|| component.endsWith(" ") || component.codePoints().anyMatch(c -> Character.isISOControl(c)
+					|| "<>:\"|?*".indexOf(c) >= 0)
+					|| component.matches("(?i)(CON|PRN|AUX|NUL|CONIN\\$|CONOUT\\$|COM[1-9¹²³]|LPT[1-9¹²³])( *\\..*)?")) {
 				return null;
 			}
 		}
 		return normalized;
 	}
 
+	protected static String entryKey(String name) {
+		return Normalizer.normalize(name, Normalizer.Form.NFC);
+	}
+
+	protected static void registerEntry(Set<String> files, Set<String> directories, String name,
+			boolean directory) throws IOException {
+		String key = entryKey(name);
+		for (int slash = key.indexOf('/'); slash >= 0; slash = key.indexOf('/', slash + 1)) {
+			String parent = key.substring(0, slash);
+			if (files.contains(parent)) {
+				throw new IOException("Archive entry conflicts with a file: " + name);
+			}
+			directories.add(parent);
+		}
+		if (directory) {
+			if (files.contains(key)) {
+				throw new IOException("Archive directory conflicts with a file: " + name);
+			}
+			directories.add(key);
+		} else if (directories.contains(key) || !files.add(key)) {
+			throw new IOException("Duplicate or conflicting archive entry: " + name);
+		}
+	}
+
+	protected static long entryLimit(String name) {
+		return SongArchives.isChartEntry(name) ? MAX_CHART_SIZE : MAX_MEDIA_SIZE;
+	}
+
 	protected static Path extractionTarget(Path root, String entryName, String errorPrefix) throws IOException {
-		Path target = root.resolve(entryName).normalize();
-		if (!target.startsWith(root)) {
+		String name = normalizeEntryNameOrNull(entryName);
+		if (name == null) {
 			throw new IOException("Unsafe " + errorPrefix + ": " + entryName);
 		}
-		return target;
+		Path directory = root.toRealPath();
+		String[] components = name.split("/");
+		for (int i = 0; i < components.length - 1; i++) {
+			directory = directory.resolve(components[i]);
+			try {
+				Files.createDirectory(directory);
+			} catch (FileAlreadyExistsException e) {
+				if (!Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS) || !directory.equals(directory.toRealPath())) {
+					throw new IOException("Unsafe " + errorPrefix + " parent: " + entryName, e);
+				}
+			}
+		}
+		return directory.resolve(components[components.length - 1]);
+	}
+
+	protected static InputStream limitedEntry(InputStream input, long limit, String name) {
+		return new FilterInputStream(input) {
+			private long remaining = limit;
+
+			private void consumed(long count) throws IOException {
+				if (count > 0 && (remaining -= count) < 0) {
+					throw new IOException("Archive entry exceeds the size limit: " + name);
+				}
+			}
+
+			@Override
+			public int read() throws IOException {
+				int value = in.read();
+				consumed(value == -1 ? 0 : 1);
+				return value;
+			}
+
+			@Override
+			public int read(byte[] bytes, int offset, int length) throws IOException {
+				Objects.checkFromIndexSize(offset, length, bytes.length);
+				int count = in.read(bytes, offset, (int) Math.min(length, Math.max(1, remaining + 1)));
+				consumed(count);
+				return count;
+			}
+
+			@Override
+			public long skip(long length) throws IOException {
+				long count = in.skip(Math.min(length, Math.max(1, remaining + 1)));
+				consumed(count);
+				return count;
+			}
+
+			@Override
+			public boolean markSupported() {
+				return false;
+			}
+
+			@Override
+			public void mark(int limit) {
+			}
+
+			@Override
+			public void reset() throws IOException {
+				throw new IOException("Archive stream does not support reset");
+			}
+		};
 	}
 
 	protected static byte[] readLimited(InputStream input, ByteArrayOutputStream output, long maxSize,
