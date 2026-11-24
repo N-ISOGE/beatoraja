@@ -1,6 +1,7 @@
 package bms.player.beatoraja.video;
 
 import java.io.ByteArrayInputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.PrintWriter;
 import java.io.StringWriter;
@@ -12,6 +13,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
+import org.bytedeco.ffmpeg.avformat.AVFormatContext;
+import org.bytedeco.ffmpeg.global.avformat;
 import org.bytedeco.javacv.FFmpegFrameGrabber;
 import org.bytedeco.javacv.Frame;
 import org.bytedeco.javacv.FrameGrabber.ImageMode;
@@ -34,6 +37,51 @@ public class FFmpegProcessor implements VideoProcessor {
 	/** JavaCV 1.5.14 exposes the borrowed AVFrame through processed RAW frames without owning their planes. */
 	static Frame grabDecodedFrame(FFmpegFrameGrabber grabber) throws Exception {
 		return grabber.grabImage();
+	}
+
+	/** Upper bound for an archive or remote movie that has to be read fully into memory. */
+	static final int MAX_REMOTE_MOVIE_BYTES = 512 * 1024 * 1024;
+
+	static byte[] readMovieBytes(SongResource resource) throws IOException {
+		return readMovieBytes(resource, MAX_REMOTE_MOVIE_BYTES);
+	}
+
+	/** Reads the movie; resources without a local path are rejected above limit bytes. */
+	static byte[] readMovieBytes(SongResource resource, int limit) throws IOException {
+		if (!resource.localPath().isPresent()) {
+			long size;
+			try {
+				size = resource.size();
+			} catch (IOException e) {
+				size = -1;
+			}
+			if (size > limit) {
+				throw new IOException("Movie exceeds " + limit + " bytes : " + resource.displayPath());
+			}
+		}
+		try (InputStream input = resource.openStream()) {
+			if (resource.localPath().isPresent()) {
+				return input.readAllBytes();
+			}
+			byte[] bytes = input.readNBytes(limit + 1);
+			if (bytes.length > limit) {
+				throw new IOException("Movie exceeds " + limit + " bytes : " + resource.displayPath());
+			}
+			return bytes;
+		}
+	}
+
+	/** True when the selected stream decodes to pictures rather than an attached cover image. */
+	static boolean hasPicture(FFmpegFrameGrabber grabber) {
+		if (grabber.getImageWidth() <= 0 || grabber.getImageHeight() <= 0 || !(grabber.getFrameRate() > 0)) {
+			return false;
+		}
+		AVFormatContext context = grabber.getFormatContext();
+		int index = grabber.getVideoStream();
+		if (context == null || index < 0 || index >= context.nb_streams()) {
+			return true;
+		}
+		return (context.streams(index).disposition() & avformat.AV_DISPOSITION_ATTACHED_PIC) == 0;
 	}
 	private enum ProcessorStatus {
 		TEXTURE_INACTIVE,
@@ -176,9 +224,7 @@ public class FFmpegProcessor implements VideoProcessor {
 			boolean cleanupFailed = false;
 			try {
 				if (haltRequested) return;
-				try (InputStream input = resource.openStream()) {
-					movieBytes = input.readAllBytes();
-				}
+				movieBytes = readMovieBytes(resource);
 				if (haltRequested) return;
 				phase = "initialize";
 				openGrabber();
@@ -352,7 +398,9 @@ public class FFmpegProcessor implements VideoProcessor {
 			grabber = new FFmpegFrameGrabber(new ByteArrayInputStream(movieBytes));
 			grabber.setImageMode(ImageMode.RAW);
 			grabber.start();
-			while (!haltRequested && grabber.getVideoBitrate() < 10) {
+			// WebM and CRF-encoded MP4 report bitrate 0 for a valid video stream; only probe
+			// other streams when the selected one has no picture.
+			while (!haltRequested && grabber.getVideoBitrate() < 10 && !hasPicture(grabber)) {
 				final int videoStream = grabber.getVideoStream();
 				try {
 					if (videoStream < 5) {

@@ -3,6 +3,8 @@ package bms.player.beatoraja.play.bga;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.Arrays;
+import java.util.List;
+import java.util.Locale;
 import java.util.logging.Logger;
 
 import bms.model.Layer.Sequence;
@@ -132,6 +134,8 @@ public final class BGAProcessor {
 			SongResource directory = chartResource.parent();
 
 			movies = new VideoProcessor[model.getBgaList().length];
+			// Listed at most once, and only when some BGA is missing under its exact name.
+			List<SongResource> listing = null;
 			for (String name : model.getBgaList()) {
 				if (progress == 1) {
 					break;
@@ -142,7 +146,7 @@ public final class BGAProcessor {
 						final int index = name.lastIndexOf('.');
 						String fex = null;
 						if (index != -1) {
-							fex = name.substring(index + 1).toLowerCase();
+							fex = name.substring(index + 1).toLowerCase(Locale.ROOT);
 						}
 						if (fex != null) {
 							if (Arrays.asList(VideoFormat.getAllExtensions()).contains(fex)){
@@ -189,6 +193,13 @@ public final class BGAProcessor {
 								}
 							}
 						}
+						if (f == null) {
+							// Archives and case-sensitive file systems keep the author's file name case.
+							if (listing == null) {
+								listing = directory.list();
+							}
+							f = findIgnoringCase(listing, name);
+						}
 					}
 				} catch (IOException | IllegalArgumentException e) {
 					Logger.getGlobal().warning(e.getMessage());
@@ -196,22 +207,20 @@ public final class BGAProcessor {
 
 				if (f != null) {
 					boolean isMovie = false;
-					for (String mov : VideoFormat.getAllExtensions()) {
-						if (f.name().toLowerCase().endsWith(mov)) {
-							try {
-								SongResource movieResource = f;
-								VideoProcessor mm = mpgresource.get(f.cacheKey(), () -> {
-									FFmpegProcessor processor = new FFmpegProcessor(config.getFrameskip());
-									processor.create(movieResource);
-									return processor;
-								});
-								movies[id] = mm;
-								isMovie = true;
-								break;
-							} catch (Throwable e) {
-								Logger.getGlobal().warning("BGAファイル読み込み失敗。" + e.getMessage());
-								e.printStackTrace();
-							}
+					// getAllExtensions() is dotless, so "kawaii" would match "avi"; match the dotted extension.
+					if (VideoFormat.getFormat(f.name()) != null) {
+						try {
+							SongResource movieResource = f;
+							VideoProcessor mm = mpgresource.get(f.cacheKey(), () -> {
+								FFmpegProcessor processor = new FFmpegProcessor(config.getFrameskip());
+								processor.create(movieResource);
+								return processor;
+							});
+							movies[id] = mm;
+							isMovie = true;
+						} catch (Throwable e) {
+							Logger.getGlobal().warning("BGAファイル読み込み失敗。" + e.getMessage());
+							e.printStackTrace();
 						}
 					}
 					if(isMovie) {
@@ -230,6 +239,21 @@ public final class BGAProcessor {
 
 		Logger.getGlobal().info("BGAファイル読み込み完了。BGA数:" + id);
 		progress = 1;
+	}
+
+	/** Movie, then image candidates for base, compared ignoring case; null when none exists. */
+	static SongResource findIgnoringCase(List<SongResource> listing, String base) {
+		for (String[] extensions : new String[][] { VideoFormat.getAllExtensions(), BGImageProcessor.pic_extension }) {
+			for (String extension : extensions) {
+				final String candidate = base + "." + extension;
+				for (SongResource child : listing) {
+					if (child.name().equalsIgnoreCase(candidate)) {
+						return child;
+					}
+				}
+			}
+		}
+		return null;
 	}
 
 	public void abort() {

@@ -1,5 +1,7 @@
 package bms.player.beatoraja.video;
 
+import java.util.Locale;
+
 import com.badlogic.gdx.utils.Array;
 
 public enum VideoFormat {
@@ -22,9 +24,11 @@ public enum VideoFormat {
 	}
 	
 	public static VideoFormat getFormat(String filename) {
+		// Locale.ROOT: e.g. the Turkish locale lowercases "AVI" to "avı".
+		final String lower = filename.toLowerCase(Locale.ROOT);
 		for(VideoFormat format : values) {
 			for(String extension : format.extensions) {
-				if(filename.toLowerCase().endsWith(extension)) {
+				if(lower.endsWith(extension)) {
 					return format;
 				}
 			}

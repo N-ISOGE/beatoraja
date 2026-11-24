@@ -59,14 +59,22 @@ public class GdxSoundDriver extends AbstractAudioDriver<Sound> {
 				}
 			}
 			final String filename = path.toString();
-			final String name = filename.substring(0, filename.lastIndexOf('.'));
-			final String ext = filename.substring(filename.lastIndexOf('.'));
+			final int index = filename.lastIndexOf('.');
+			final String name = index < 0 ? filename : filename.substring(0, index);
+			final String ext = index < 0 ? "" : filename.substring(index);
 			final Sound sound = getKeySound(name, ext);
 			if(sound != null) {
 				return sound;
 			}
+			// libGDX decodes .ogg/.mp3 by extension only; PCM.load also checks the content signature.
+			if (!ext.equalsIgnoreCase(".wav") && !ext.equalsIgnoreCase(".flac")) {
+				PCM pcm = PCM.load(path, this);
+				if (pcm != null) {
+					return getKeySound(pcm);
+				}
+			}
 		}
-		return null;		
+		return null;
 	}
 
 	@Override
@@ -110,17 +118,22 @@ public class GdxSoundDriver extends AbstractAudioDriver<Sound> {
 			source = pcm;
 		}
 
-		return Gdx.audio.newSound(new FileHandleStream("tempwav.wav") {
-			@Override
-			public InputStream read() {
-				return new WavFileInputStream(source);
-			}
+		try {
+			return Gdx.audio.newSound(new FileHandleStream("tempwav.wav") {
+				@Override
+				public InputStream read() {
+					return new WavFileInputStream(source);
+				}
 
-			@Override
-			public OutputStream write(boolean overwrite) {
-				return null;
-			}
-		});
+				@Override
+				public OutputStream write(boolean overwrite) {
+					return null;
+				}
+			});
+		} catch (GdxRuntimeException e) {
+			Logger.getGlobal().warning("音源ファイル読み込み失敗" + e.getMessage());
+		}
+		return null;
 	}
 
 	private Object lock = new Object();
@@ -355,12 +368,12 @@ public class GdxSoundDriver extends AbstractAudioDriver<Sound> {
 
 		@Override
 		public InputStream read() {
-			try {
-				return new WavFileInputStream(PCM.load(p,GdxSoundDriver.this));
-			} catch (Exception e) {
-				e.printStackTrace();
+			PCM pcm = PCM.load(p, GdxSoundDriver.this);
+			if (pcm == null) {
+				// FileHandle.read() reports failures as GdxRuntimeException, which getKeySound(FileHandle) handles.
+				throw new GdxRuntimeException("Unable to decode audio : " + p);
 			}
-			return null;
+			return new WavFileInputStream(pcm);
 		}
 
 		@Override
