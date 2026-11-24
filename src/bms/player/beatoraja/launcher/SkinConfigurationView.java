@@ -4,7 +4,6 @@ import java.io.IOException;
 import java.net.URL;
 import java.nio.file.*;
 import java.util.*;
-import java.util.stream.Stream;
 
 import bms.player.beatoraja.Config;
 import bms.player.beatoraja.PlayerConfig;
@@ -37,6 +36,10 @@ public class SkinConfigurationView implements Initializable {
 	private ComboBox<SkinHeader> skinheaderSelector;
 	@FXML
 	private ScrollPane skinconfig;
+	@FXML
+	private CheckBox restrictSkinPreviewEffects;
+
+	private Config systemConfig;
 
 	private PlayerConfig player;
 	private SkinType mode = null;
@@ -189,7 +192,14 @@ public class SkinConfigurationView implements Initializable {
 		}
 	}
     
+    @FXML
+    private void changePreviewSecurity() {
+        if (systemConfig != null) systemConfig.setRestrictSkinPreviewEffects(restrictSkinPreviewEffects.isSelected());
+    }
+
     public void update(Config config) {
+        systemConfig = config;
+        if (restrictSkinPreviewEffects != null) restrictSkinPreviewEffects.setSelected(config.isRestrictSkinPreviewEffects());
 		List<Path> skinpaths = new ArrayList<Path>();
 		scan(Paths.get(config.getSkinpath()), skinpaths);
 		for (Path path : skinpaths) {
@@ -201,8 +211,7 @@ public class SkinConfigurationView implements Initializable {
 					skinheader.add(header);
 				}
 			} else if (pathString.endsWith(".luaskin")) {
-				LuaSkinLoader loader = new LuaSkinLoader();
-				SkinHeader header = loader.loadHeader(path);
+				SkinHeader header = LuaSkinLoader.loadSandboxedHeader(path);
 				if (header != null) {
 					skinheader.add(header);
 				}
@@ -235,20 +244,8 @@ public class SkinConfigurationView implements Initializable {
 		}
     }
     
-	private void scan(Path p, final List<Path> paths) {
-		if (Files.isSymbolicLink(p)) {
-			return;
-		}
-		if (Files.isDirectory(p, LinkOption.NOFOLLOW_LINKS)) {
-			try (Stream<Path> sub = Files.list(p)) {
-				sub.forEach(t -> scan(t, paths));
-			} catch (IOException e) {
-			}
-		} else if (p.getFileName().toString().toLowerCase().endsWith(".lr2skin")
-				|| p.getFileName().toString().toLowerCase().endsWith(".luaskin")
-				|| p.getFileName().toString().toLowerCase().endsWith(".json")) {
-			paths.add(p);
-		}
+	private void scan(Path p, List<Path> paths) {
+		paths.addAll(SkinCatalog.scanSkinFiles(p));
 	}
 
     public void update(PlayerConfig player) {
