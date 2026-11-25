@@ -116,8 +116,10 @@ static NSString *BRString(JNIEnv *env, jstring value) {
         if ([self hasMarkedText]) [self unmarkText];
         [self.ime send:3 text:nil anchor:0 cursor:0 consumed:consumed];
     } else if (selector == @selector(cancelOperation:)) {
+        BOOL consumed = self.keyStartedMarked || [self hasMarkedText];
         if ([self hasMarkedText]) [self.ime cancel];
-        // Escape never leaves this editor or navigates the game.
+        // Escape never navigates the game. Outside a composition the Java field cancels its edit.
+        [self.ime send:4 text:nil anchor:0 cursor:0 consumed:consumed];
     } else {
         NSString *name = NSStringFromSelector(selector);
         if ([name hasPrefix:@"move"] || [name hasPrefix:@"delete"] || [name hasPrefix:@"select"])

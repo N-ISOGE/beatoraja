@@ -189,6 +189,16 @@ public final class Lwjgl3TextInputTest {
                 check(writes.get() == 1 && !editor.isActive() && "submitted".equals(field.getText()),
                         "Escape cancels the search draft for either backend");
                 key(handle, GLFW.GLFW_KEY_ESCAPE, GLFW.GLFW_RELEASE); source.update();
+                if (nativeSession) {
+                    // macOS: the native editor owns key events and reports Esc only as a command.
+                    check(editor.focus(state, target), "Search reopens for a native Escape command");
+                    field.setText("command-draft"); state.getStage().act(0);
+                    bridge.command(ImeBridge.Command.CANCEL, true); state.getStage().act(0);
+                    check(editor.isActive(), "Consumed native Escape command keeps the editor open");
+                    bridge.command(ImeBridge.Command.CANCEL, false); state.getStage().act(0);
+                    check(writes.get() == 1 && !editor.isActive() && "submitted".equals(field.getText()) && bridge.closes == 4,
+                            "Native Escape command cancels the draft without a Scene2D key event");
+                }
             } finally { editor.dispose(); }
         }
     }

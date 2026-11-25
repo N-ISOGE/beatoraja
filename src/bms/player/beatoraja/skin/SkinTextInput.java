@@ -218,6 +218,8 @@ class SkinTextInput {
 		bridge.poll(session.id());
 		session.drain();
 		if (session.usesIme()) {
+			// macOS のネイティブ編集欄は Esc のキー事象を Scene2D に渡さず、命令だけを報告する。 / The macOS native editor reports Esc only as a command, never as a Scene2D key event.
+			if (session.isCancelRequested()) { cancelOnFocusLoss(); return; }
 			if (session.isFinished()) { completeCommit(); return; }
 			String display = session.displayText();
 			if (!textField.getText().equals(display)) {
