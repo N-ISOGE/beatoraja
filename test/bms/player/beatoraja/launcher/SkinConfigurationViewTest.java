@@ -33,6 +33,7 @@ public final class SkinConfigurationViewTest {
 	}
 
 	public static void main(String[] args) throws Exception {
+		verifyPreviewRestrictionConfig();
 		Path root = Files.createTempDirectory("skin-scan-test");
 		Path outside = Files.createTempDirectory("skin-scan-outside-test");
 		try {
@@ -130,6 +131,27 @@ public final class SkinConfigurationViewTest {
         System.out.println("SkinConfigurationView Notes Offset Center passed (real FXML, placement, choices, save/history/restore/reset)");
         return root;
     }
+
+	/** Headless check with the same Json settings as Config.write and Config.read. */
+	private static void verifyPreviewRestrictionConfig() {
+		var reader = new com.badlogic.gdx.utils.Json();
+		reader.setIgnoreUnknownFields(true);
+		var legacy = reader.readValue(Config.class, new com.badlogic.gdx.utils.JsonReader().parse("{\"skinpath\":\"skin\"}"));
+		if (legacy.isRestrictSkinPreviewEffects())
+			throw new AssertionError("Older config without the key must keep previews unrestricted");
+		var writer = new com.badlogic.gdx.utils.Json();
+		writer.setUsePrototypes(false);
+		writer.setOutputType(com.badlogic.gdx.utils.JsonWriter.OutputType.json);
+		for (boolean value : new boolean[]{true, false}) {
+			var config = new Config();
+			config.setRestrictSkinPreviewEffects(value);
+			config.validate();
+			var saved = writer.prettyPrint(config);
+			var loaded = reader.readValue(Config.class, new com.badlogic.gdx.utils.JsonReader().parse(saved));
+			if (!saved.contains("\"restrictSkinPreviewEffects\"") || loaded.isRestrictSkinPreviewEffects() != value)
+				throw new AssertionError("Preview restriction must save and load as " + value);
+		}
+	}
 
 	private static List<Path> scan(Path root) throws Exception {
 		SkinConfigurationView view = new SkinConfigurationView();
