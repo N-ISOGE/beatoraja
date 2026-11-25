@@ -326,6 +326,7 @@ val regressionClasses = listOf(
     "bms.player.beatoraja.ir.IRWorkerSecurityTest",
     "bms.player.beatoraja.ir.BundledIRIntegrationTest",
     "bms.player.beatoraja.ir.BundledIRTest",
+    "bms.player.beatoraja.MainLoaderVersionTest",
     "bms.player.beatoraja.select.BarSorterTest",
     "bms.player.beatoraja.select.BarSorterConfigurationTest",
     "bms.player.beatoraja.select.ModeFilterTest",
