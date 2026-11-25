@@ -5,6 +5,7 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.IOException;
+import java.io.StringReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.Arrays;
@@ -79,7 +80,9 @@ final class BitmapFontLoader {
 
 			// 先頭 2 行(info/common)から元サイズとページ寸法を読む。読めなければ libGDX の計測値で代用する。
 			// Read the original size and page size from the info/common lines; fall back to libGDX metrics if unreadable.
-			try (BufferedReader reader = SkinTextReader.open(_fontPath)) {
+			// 同じファイルを読み直さず、createRemappedFontFile で解読した元テキストを使う。
+			// Reuse the text already decoded by createRemappedFontFile instead of reading the file again.
+			try (BufferedReader reader = new BufferedReader(new StringReader(remappedFontFile.text))) {
 				String line = reader.readLine();
 				_originalSize = (float) Integer.parseInt(line.substring(line.indexOf("size=") + 5).split(" ")[0]);
 				line = reader.readLine();
@@ -199,13 +202,13 @@ final class BitmapFontLoader {
 		if (glyphMap.isEmpty()) {
 			byte[] utf8Bytes = fontText.getBytes(StandardCharsets.UTF_8);
 			if (Arrays.equals(rawBytes, utf8Bytes)) {
-				return new RemappedFontFile(fontFile, Collections.emptyMap());
+				return new RemappedFontFile(fontFile, Collections.emptyMap(), fontText);
 			}
 			return new RemappedFontFile(new InMemoryFontFileHandle(fontFile, utf8Bytes),
-					Collections.emptyMap());
+					Collections.emptyMap(), fontText);
 		}
 		return new RemappedFontFile(new InMemoryFontFileHandle(fontFile, remappedText.toString().getBytes(StandardCharsets.UTF_8)),
-				glyphMap);
+				glyphMap, fontText);
 	}
 
 	private static byte[] readFontBytes(FileHandle fontFile, Path previewRoot) throws IOException {
@@ -321,15 +324,18 @@ final class BitmapFontLoader {
 	}
 
 	/**
-	 * 読み込み用ハンドルと、取り除いた補助平面グリフの組。 / Read handle paired with the removed supplementary-plane glyphs.
+	 * 読み込み用ハンドルと、取り除いた補助平面グリフ、解読済みの元テキストの組。
+	 * Read handle paired with the removed supplementary-plane glyphs and the decoded original text.
 	 */
 	static final class RemappedFontFile {
 		final FileHandle fileHandle;
 		final Map<Integer, BitmapFont.Glyph> supplementaryGlyphs;
+		final String text;
 
-		private RemappedFontFile(FileHandle fileHandle, Map<Integer, BitmapFont.Glyph> supplementaryGlyphs) {
+		private RemappedFontFile(FileHandle fileHandle, Map<Integer, BitmapFont.Glyph> supplementaryGlyphs, String text) {
 			this.fileHandle = fileHandle;
 			this.supplementaryGlyphs = supplementaryGlyphs;
+			this.text = text;
 		}
 	}
 

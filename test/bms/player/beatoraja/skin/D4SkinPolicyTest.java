@@ -144,6 +144,8 @@ public final class D4SkinPolicyTest {
                             blocked = true;
                         }
                         check(blocked);
+                    } else {
+                        System.out.println("D4SkinPolicyTest: link case skipped (symlink/junction could not be created)");
                     }
                 } finally {
                     if (linkCreated) {
