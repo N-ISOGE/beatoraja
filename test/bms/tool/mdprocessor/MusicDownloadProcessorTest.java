@@ -196,6 +196,9 @@ public class MusicDownloadProcessorTest {
         expectIo(() -> IpfsTransfer.validateRedirectTarget(URI.create("https://example.com/ipfs/" + CID_V1), true));
         expectIo(() -> IpfsTransfer.validateRedirectTarget(URI.create("http://127.0.0.1:8080/ipfs/" + CID_V1), false));
         expectIo(() -> IpfsTransfer.validateRedirectTarget(URI.create("http://10.0.0.1/ipfs/" + CID_V1), false));
+        IpfsTransfer.validateRedirectScheme(URI.create("http://gateway.example/ipfs/"), URI.create("https://gateway.example/ipfs/"));
+        expectIo(() -> IpfsTransfer.validateRedirectScheme(URI.create("https://gateway.example/ipfs/"),
+                URI.create("http://gateway.example/ipfs/")));
         expectIo(() -> IpfsTransfer.validateRedirectTarget(URI.create("http://user:pass@localhost:8080/"), true));
 
         byte[] tarPayload = tar("wrapped/chart.bms", false);
@@ -209,6 +212,12 @@ public class MusicDownloadProcessorTest {
                 try (exchange) {
                     exchange.getResponseHeaders().set("Location", "https://example.invalid/ipfs/" + CID_V1);
                     exchange.sendResponseHeaders(301, -1);
+                }
+            } else if (path.contains("/temporary")) {
+                try (exchange) {
+                    exchange.getResponseHeaders().set("Location",
+                            "http://127.0.0.1:" + port + "/ipfs/" + CID_V1 + "?format=tar");
+                    exchange.sendResponseHeaders(307, -1);
                 }
             } else if (path.contains("/loop")) {
                 try (exchange) {
@@ -241,6 +250,9 @@ public class MusicDownloadProcessorTest {
 
             processor.start(song(CID_V1 + "/cross", null, "Cross boundary"));
             require(awaitFailure(processor).contains("trust boundary"), "cross-boundary redirect rejected");
+
+            processor.start(song(CID_V1 + "/temporary", null, "Temporary redirect"));
+            require(awaitFailure(processor).contains("HTTP 307"), "only 301 and 302 redirects are followed");
 
             processor.start(song(CID_V1 + "/loop", null, "Redirect loop"));
             require(awaitFailure(processor).contains("redirects"), "excessive redirects rejected");

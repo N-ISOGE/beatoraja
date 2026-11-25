@@ -380,13 +380,12 @@ final class IpfsTransfer {
             } catch (IllegalArgumentException e) {
                 throw new IOException("Invalid IPFS redirect URI", e);
             }
+            validateRedirectScheme(current, next);
             validateRedirectTarget(next, initialLocal);
             if (initialLocal) {
                 next = resolveUnresolvableSubdomainLocalhost(next);
             }
-            if (status != 307 && status != 308) {
-                usePost = false;
-            }
+            usePost = false;
             current = next;
         }
     }
@@ -426,7 +425,13 @@ final class IpfsTransfer {
     }
 
     private static boolean isRedirect(int status) {
-        return status == 301 || status == 302 || status == 303 || status == 307 || status == 308;
+        return status == 301 || status == 302;
+    }
+
+    static void validateRedirectScheme(URI from, URI to) throws IOException {
+        if ("https".equalsIgnoreCase(from.getScheme()) && !"https".equalsIgnoreCase(to.getScheme())) {
+            throw new IOException("IPFS redirect downgraded from HTTPS");
+        }
     }
 
     private static boolean isLocalHost(String host) {
