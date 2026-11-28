@@ -20,6 +20,7 @@ import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.SimpleFileVisitor;
+import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.security.MessageDigest;
@@ -202,7 +203,7 @@ final class IpfsTransfer {
                 if (staging.startsWith(source)) {
                     throw new IOException("The base chart folder contains the IPFS staging folder");
                 }
-                copyTree(source, content, output);
+                stageParentAssets(source, content, output);
             }
             if (diff != null) {
                 materialize(diff, staging, content, output);
@@ -603,6 +604,7 @@ final class IpfsTransfer {
             Files.createDirectories(target);
         } else {
             Files.createDirectories(target.getParent());
+            Files.deleteIfExists(target);
             finishFile(input, target, budget, false);
         }
     }
@@ -612,6 +614,52 @@ final class IpfsTransfer {
                 && !value.endsWith(".") && !value.endsWith(" ")
                 && !value.matches(".*[\\p{Cntrl}<>:\"/\\\\|?*].*")
                 && !value.matches("(?i)(CON|PRN|AUX|NUL|CONIN\\$|CONOUT\\$|COM[1-9¹²³]|LPT[1-9¹²³])( *\\..*)?");
+    }
+
+    @FunctionalInterface
+    interface LinkCreator {
+        void createLink(Path link, Path existing) throws IOException;
+    }
+
+    static void linkOrCopy(Path src, Path dest, Budget budget) throws IOException {
+        linkOrCopy(src, dest, budget, Files::createLink);
+    }
+
+    static void linkOrCopy(Path src, Path dest, Budget budget, LinkCreator linker) throws IOException {
+        budget.bytes(Files.size(src));
+        Files.deleteIfExists(dest);
+        try {
+            linker.createLink(dest, src);
+        } catch (IOException | UnsupportedOperationException | SecurityException e) {
+            Files.copy(src, dest, StandardCopyOption.REPLACE_EXISTING);
+        }
+    }
+
+    private static void stageParentAssets(Path source, Path target, Budget budget) throws IOException {
+        Files.walkFileTree(source, new SimpleFileVisitor<>() {
+            @Override
+            public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) throws IOException {
+                budget.entry();
+                if (source.relativize(dir).getNameCount() > 32) {
+                    throw new IOException("IPFS song directory is too deep");
+                }
+                Files.createDirectories(target.resolve(source.relativize(dir)));
+                return FileVisitResult.CONTINUE;
+            }
+
+            @Override
+            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
+                if (!attrs.isRegularFile()) {
+                    throw new IOException("Unsupported file in the base chart folder");
+                }
+                if (isChartName(file.getFileName().toString())) {
+                    return FileVisitResult.CONTINUE;
+                }
+                budget.entry();
+                linkOrCopy(file, target.resolve(source.relativize(file)), budget);
+                return FileVisitResult.CONTINUE;
+            }
+        });
     }
 
     private static void copyTree(Path source, Path target, Budget budget) throws IOException {
@@ -641,6 +689,9 @@ final class IpfsTransfer {
     }
 
     private static void finishFile(InputStream input, Path path, Budget budget, boolean replace) throws IOException {
+        if (replace) {
+            Files.deleteIfExists(path);
+        }
         StandardOpenOption[] options = replace
                 ? new StandardOpenOption[] {StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE}
                 : new StandardOpenOption[] {StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE};
