@@ -6,8 +6,10 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.math.BigInteger;
+import java.net.InetAddress;
 import java.net.URI;
 import java.net.URLEncoder;
+import java.net.UnknownHostException;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -27,11 +29,16 @@ import java.util.Arrays;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executors;
 import java.util.concurrent.Flow;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
@@ -51,16 +58,31 @@ final class IpfsTransfer {
     private static final String BASE58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
     private static final String BASE32 = "abcdefghijklmnopqrstuvwxyz234567";
 
+    private static final int MAX_REDIRECTS = 3;
+    private static final Duration HEADER_TIMEOUT = Duration.ofSeconds(30);
+    private static final Duration DEFAULT_STALL_TIMEOUT = Duration.ofSeconds(30);
+    private static final ScheduledExecutorService STALL_WATCHDOG = Executors.newSingleThreadScheduledExecutor(task -> {
+        Thread thread = new Thread(task, "ipfs-stall-watchdog");
+        thread.setDaemon(true);
+        return thread;
+    });
+
     private final String endpoint;
     private final Path root;
+    private final Duration stallTimeout;
     private final HttpClient client = HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(5))
+            .connectTimeout(Duration.ofSeconds(15))
             .followRedirects(HttpClient.Redirect.NEVER)
             .build();
 
     IpfsTransfer(String endpoint, Path root) {
+        this(endpoint, root, DEFAULT_STALL_TIMEOUT);
+    }
+
+    IpfsTransfer(String endpoint, Path root, Duration stallTimeout) {
         this.endpoint = endpoint;
         this.root = root.toAbsolutePath().normalize();
+        this.stallTimeout = stallTimeout;
     }
 
     static String reference(String value) throws IOException {
@@ -296,8 +318,7 @@ final class IpfsTransfer {
         if (rpc || (local && !path.endsWith("/ipfs"))) {
             URI url = URI.create(authority + encodePath(prefix) + "/api/v0/get?arg="
                     + encode("/ipfs/" + ref) + "&archive=true&compress=true");
-            HttpResponse<Path> response = request(HttpRequest.newBuilder(url)
-                    .POST(HttpRequest.BodyPublishers.noBody()), payload);
+            HttpResponse<Path> response = request(url, true, false, payload);
             if (response.statusCode() == 200) {
                 return mediaType(response);
             }
@@ -306,8 +327,7 @@ final class IpfsTransfer {
             }
         }
         URI url = URI.create(authority + encodePath(prefix) + "/ipfs/" + encodedRef + "?format=tar");
-        HttpResponse<Path> response = request(HttpRequest.newBuilder(url)
-                .header("Accept", "application/x-tar, application/octet-stream;q=0.9, text/plain;q=0.8"), payload);
+        HttpResponse<Path> response = request(url, false, true, payload);
         if (response.statusCode() != 200) {
             throw new IOException("IPFS gateway returned HTTP " + response.statusCode());
         }
@@ -328,25 +348,167 @@ final class IpfsTransfer {
         }
     }
 
-    private HttpResponse<Path> request(HttpRequest.Builder builder, Path payload) throws IOException {
-        var response = client.sendAsync(builder.timeout(Duration.ofSeconds(15)).build(), info -> {
+    private HttpResponse<Path> request(URI initialUrl, boolean post, boolean gatewayAccept, Path payload)
+            throws IOException {
+        boolean initialLocal = isLocalHost(initialUrl.getHost());
+        URI current = initialUrl;
+        boolean usePost = post;
+        for (int hop = 0; ; hop++) {
+            HttpRequest.Builder builder = HttpRequest.newBuilder(current).timeout(HEADER_TIMEOUT);
+            if (usePost) {
+                builder.POST(HttpRequest.BodyPublishers.noBody());
+            }
+            if (gatewayAccept) {
+                builder.header("Accept", "application/x-tar, application/octet-stream;q=0.9, text/plain;q=0.8");
+            }
+            HttpResponse<Path> response = sendWithWatchdog(builder.build(), payload);
+            int status = response.statusCode();
+            if (!isRedirect(status)) {
+                return response;
+            }
+            if (hop >= MAX_REDIRECTS) {
+                throw new IOException("Too many IPFS redirects");
+            }
+            String location = response.headers().firstValue("Location").orElse(null);
+            if (location == null || location.isBlank()) {
+                throw new IOException("IPFS redirect missing Location");
+            }
+            URI next;
+            try {
+                next = current.resolve(location.strip());
+            } catch (IllegalArgumentException e) {
+                throw new IOException("Invalid IPFS redirect URI", e);
+            }
+            validateRedirectTarget(next, initialLocal);
+            if (initialLocal) {
+                next = resolveUnresolvableSubdomainLocalhost(next);
+            }
+            if (status != 307 && status != 308) {
+                usePost = false;
+            }
+            current = next;
+        }
+    }
+
+    private HttpResponse<Path> sendWithWatchdog(HttpRequest request, Path payload) throws IOException {
+        AtomicLong lastActivityNanos = new AtomicLong(System.nanoTime());
+        AtomicBoolean stalled = new AtomicBoolean();
+        var response = client.sendAsync(request, info -> {
             HttpResponse.BodySubscriber<Path> body = info.statusCode() == 200
                     ? HttpResponse.BodySubscribers.ofFile(payload, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)
                     : HttpResponse.BodySubscribers.replacing(null);
-            return new LimitedBody(body);
+            return new LimitedBody(body, lastActivityNanos);
         });
+        long stallNanos = Math.max(1L, stallTimeout.toNanos());
+        long checkMillis = Math.max(50L, Math.min(1000L, stallTimeout.toMillis() / 4));
+        ScheduledFuture<?> watchdog = STALL_WATCHDOG.scheduleAtFixedRate(() -> {
+            if (System.nanoTime() - lastActivityNanos.get() >= stallNanos && stalled.compareAndSet(false, true)) {
+                response.cancel(true);
+            }
+        }, checkMillis, checkMillis, TimeUnit.MILLISECONDS);
         try {
-            return response.get(120, TimeUnit.SECONDS);
+            return response.get();
         } catch (InterruptedException e) {
             response.cancel(true);
             Thread.currentThread().interrupt();
             throw new IOException("IPFS transfer cancelled", e);
-        } catch (TimeoutException e) {
-            response.cancel(true);
-            throw new IOException("IPFS transfer timed out", e);
+        } catch (CancellationException e) {
+            throw new IOException(stalled.get() ? "IPFS transfer stalled" : "IPFS transfer cancelled", e);
         } catch (ExecutionException e) {
+            if (stalled.get()) {
+                throw new IOException("IPFS transfer stalled", e.getCause());
+            }
             throw new IOException("Unable to receive IPFS response", e.getCause());
+        } finally {
+            watchdog.cancel(false);
         }
+    }
+
+    private static boolean isRedirect(int status) {
+        return status == 301 || status == 302 || status == 303 || status == 307 || status == 308;
+    }
+
+    private static boolean isLocalHost(String host) {
+        return host != null && (host.equalsIgnoreCase("localhost")
+                || host.equals("127.0.0.1") || host.equals("[::1]") || host.equals("::1"));
+    }
+
+    private static boolean isLocalRedirectHost(String host) {
+        if (isLocalHost(host)) {
+            return true;
+        }
+        String lower = host.toLowerCase(Locale.ROOT);
+        return lower.endsWith(".localhost") && lower.length() > ".localhost".length();
+    }
+
+    static void validateRedirectTarget(URI target, boolean initialLocal) throws IOException {
+        String scheme = target.getScheme();
+        String host = target.getHost();
+        if (host == null || target.getRawUserInfo() != null
+                || !("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme))) {
+            throw new IOException("Invalid IPFS redirect URI");
+        }
+        if (initialLocal) {
+            if (!isLocalRedirectHost(host)) {
+                throw new IOException("IPFS redirect crossed local trust boundary");
+            }
+            return;
+        }
+        if (isLocalRedirectHost(host)) {
+            throw new IOException("IPFS redirect target is not a public address");
+        }
+        String bareHost = host.startsWith("[") && host.endsWith("]") ? host.substring(1, host.length() - 1) : host;
+        InetAddress[] addresses;
+        try {
+            addresses = InetAddress.getAllByName(bareHost);
+        } catch (UnknownHostException e) {
+            throw new IOException("Unable to resolve IPFS redirect host", e);
+        }
+        if (addresses.length == 0) {
+            throw new IOException("IPFS redirect target has no addresses");
+        }
+        for (InetAddress address : addresses) {
+            if (!isPublicAddress(address)) {
+                throw new IOException("IPFS redirect target is not a public address");
+            }
+        }
+    }
+
+    private static URI resolveUnresolvableSubdomainLocalhost(URI next) throws IOException {
+        String host = next.getHost();
+        if (host == null) {
+            return next;
+        }
+        String lower = host.toLowerCase(Locale.ROOT);
+        if (!lower.endsWith(".ipfs.localhost")) {
+            return next;
+        }
+        try {
+            InetAddress.getAllByName(host);
+            return next;
+        } catch (UnknownHostException ignored) {
+            String cidLabel = host.substring(0, host.length() - ".ipfs.localhost".length());
+            if (cidLabel.isEmpty() || cidLabel.indexOf('.') >= 0) {
+                return next;
+            }
+            String path = next.getRawPath();
+            String mappedPath = "/ipfs/" + cidLabel + (path == null || path.isEmpty() ? "" : path);
+            try {
+                return new URI(next.getScheme(), null, "127.0.0.1", next.getPort(), mappedPath,
+                        next.getRawQuery(), null);
+            } catch (Exception e) {
+                throw new IOException("Invalid IPFS redirect URI", e);
+            }
+        }
+    }
+
+    private static boolean isPublicAddress(InetAddress addr) {
+        if (addr.isAnyLocalAddress() || addr.isLoopbackAddress() || addr.isLinkLocalAddress()
+                || addr.isSiteLocalAddress() || addr.isMulticastAddress()) {
+            return false;
+        }
+        byte[] raw = addr.getAddress();
+        return !(raw.length == 16 && (raw[0] & 0xfe) == 0xfc);
     }
 
     private static String encode(String segment) {
@@ -574,12 +736,14 @@ final class IpfsTransfer {
 
     private static final class LimitedBody implements HttpResponse.BodySubscriber<Path> {
         private final HttpResponse.BodySubscriber<Path> delegate;
+        private final AtomicLong lastActivityNanos;
         private Flow.Subscription subscription;
         private long bytes;
         private boolean rejected;
 
-        LimitedBody(HttpResponse.BodySubscriber<Path> delegate) {
+        LimitedBody(HttpResponse.BodySubscriber<Path> delegate, AtomicLong lastActivityNanos) {
             this.delegate = delegate;
+            this.lastActivityNanos = lastActivityNanos;
         }
 
         @Override
@@ -590,6 +754,7 @@ final class IpfsTransfer {
         @Override
         public void onSubscribe(Flow.Subscription subscription) {
             this.subscription = subscription;
+            lastActivityNanos.set(System.nanoTime());
             delegate.onSubscribe(subscription);
         }
 
@@ -598,6 +763,7 @@ final class IpfsTransfer {
             if (rejected) {
                 return;
             }
+            lastActivityNanos.set(System.nanoTime());
             for (ByteBuffer buffer : data) {
                 bytes += buffer.remaining();
             }
