@@ -304,7 +304,9 @@ public final class MusicSelector extends MainState {
 				SongData song = ((SongBar) current).getSongData();
 				if (((SongBar) current).existsSong()) {
 					readChart(song, current);					
-				} else if (song.getIpfs() != null && main.getMusicDownloadProcessor() != null
+				} else if (((song.getIpfs() != null && !song.getIpfs().isBlank())
+						|| (song.getAppendIpfs() != null && !song.getAppendIpfs().isBlank()))
+						&& main.getMusicDownloadProcessor() != null
 						&& main.getMusicDownloadProcessor().isAlive()) {
 					execute(MusicSelectCommand.DOWNLOAD_IPFS);
 				} else {

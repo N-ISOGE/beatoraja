@@ -602,6 +602,15 @@ public class SongData implements Validatable, IpfsInformation {
 		if(appendurl == null || appendurl.length() == 0) {
 			appendurl = song.getAppendurl();
 		}
+		if ((ipfs == null || ipfs.isBlank()) && song.getIpfs() != null && !song.getIpfs().isBlank()) {
+			ipfs = song.getIpfs();
+		}
+		if ((appendipfs == null || appendipfs.isBlank()) && song.getAppendIpfs() != null && !song.getAppendIpfs().isBlank()) {
+			appendipfs = song.getAppendIpfs();
+		}
+		if ((org_md5 == null || org_md5.isEmpty()) && song.getOrg_md5() != null && !song.getOrg_md5().isEmpty()) {
+			org_md5 = new java.util.ArrayList<>(song.getOrg_md5());
+		}
 	}
 	
 	public void shrink() {

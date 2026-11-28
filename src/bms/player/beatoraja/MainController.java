@@ -164,16 +164,6 @@ public final class MainController {
 
 		this.bmsfile = f;
 
-		if (config.isEnableIpfs()) {
-			Path ipfspath = Paths.get("ipfs").toAbsolutePath();
-			if (!ipfspath.toFile().exists())
-				ipfspath.toFile().mkdirs();
-			List<String> roots = new ArrayList<>(Arrays.asList(getConfig().getBmsroot()));
-			if (ipfspath.toFile().exists() && !roots.contains(ipfspath.toString())) {
-				roots.add(ipfspath.toString());
-				getConfig().setBmsroot(roots.toArray(new String[roots.size()]));
-			}
-		}
 		try {
 			Class.forName("org.sqlite.JDBC");
 			if(config.isUseSongInfo()) {
@@ -601,8 +591,14 @@ public final class MainController {
 		}
 
 		// TODO renderループに入れるのではなく、MusicDownloadProcessorのListenerとして実装したほうがいいのでは
-		if(download != null && download.isDownload()){
-			downloadIpfsMessageRenderer(download.getMessage());
+		if (download != null) {
+			String failure;
+			while ((failure = download.pollFailure()) != null) {
+				messageRenderer.addMessage(failure, 5000, Color.ORANGE, 1);
+			}
+			if (download.isDownload()) {
+				downloadIpfsMessageRenderer(download.getMessage());
+			}
 		}
 
 		if (skinAdjustment != null) {
@@ -688,14 +684,7 @@ public final class MainController {
                 }
             }
 
-			if (download != null && download.getDownloadpath() != null) {
-            	this.updateSong(download.getDownloadpath());
-            	download.setDownloadpath(null);
-            }
-			if (updateSong != null && !updateSong.isAlive()) {
-				selector.getBarManager().updateBar();
-				updateSong = null;
-			}
+			updateDownloadedSongs();
         }
 	}
 
@@ -891,16 +880,32 @@ public final class MainController {
 
 	private UpdateThread updateSong;
 
-	public void updateSong(String path) {
-		if (updateSong == null || !updateSong.isAlive()) {
-			updateSong = new SongUpdateThread(path);
-			updateSong.start();
-		} else {
+	private synchronized void updateDownloadedSongs() {
+		if (updateSong != null && !updateSong.isAlive()) {
+			selector.getBarManager().updateBar();
+			updateSong = null;
+		}
+		if (download != null) {
+			download.handoff(this::startSongUpdate);
+		}
+	}
+
+	public synchronized void updateSong(String path) {
+		if (!startSongUpdate(path)) {
 			Logger.getGlobal().warning("楽曲更新中のため、更新要求は取り消されました");
 		}
 	}
 
-	public void updateTable(TableBar reader) {
+	private boolean startSongUpdate(String path) {
+		if (updateSong != null && updateSong.isAlive()) {
+			return false;
+		}
+		updateSong = new SongUpdateThread(path);
+		updateSong.start();
+		return true;
+	}
+
+	public synchronized void updateTable(TableBar reader) {
 		if (updateSong == null || !updateSong.isAlive()) {
 			updateSong = new TableUpdateThread(reader);
 			updateSong.start();
@@ -947,7 +952,7 @@ public final class MainController {
 
 		public void run() {
 			Message message = messageRenderer.addMessage(this.message, Color.CYAN, 1);
-			getSongDatabase().updateSongDatas(path, config.getBmsroot(), false, getInfoDatabase());
+			getSongDatabase().updateSongDatas(path, MusicDownloadProcessor.songScanRoots(config.getBmsroot()), false, getInfoDatabase());
 			message.stop();
 		}
 	}
