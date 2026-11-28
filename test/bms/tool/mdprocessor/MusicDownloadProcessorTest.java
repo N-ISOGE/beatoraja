@@ -1,5 +1,7 @@
 package bms.tool.mdprocessor;
 
+import bms.player.beatoraja.song.SQLiteSongDatabaseAccessor;
+import bms.player.beatoraja.song.SongData;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
@@ -35,6 +37,7 @@ public class MusicDownloadProcessorTest {
         Path root = Files.createTempDirectory(Path.of(args[0]), "ipfs-regression-");
         validateInputsAndLimits();
         runtimeScanRoots(root.resolve("scan"));
+        sqliteRetainsManagedIpfsRoot(root.resolve("sqlite-scan"));
         transferAndHandoff(root.resolve("transfer"));
         extensionlessTarEntries(root.resolve("extensionless-tar"));
         localhostRedirectAndStall(root.resolve("redirect-stall"));
@@ -53,6 +56,36 @@ public class MusicDownloadProcessorTest {
         require(Arrays.equals(MusicDownloadProcessor.songScanRoots(configured, root), new String[] {"configured", prefix}),
                 "runtime root uses one native path prefix with a separator");
         require(configured[1].equals(directory.toString()), "configured roots unchanged");
+    }
+
+    private static void sqliteRetainsManagedIpfsRoot(Path root) throws Exception {
+        Files.createDirectories(root);
+        Path bmsRoot = Files.createDirectories(root.resolve("songs"));
+        Path ipfsRoot = Files.createDirectories(root.resolve("ipfs"));
+        Files.createDirectories(bmsRoot.resolve("base"));
+        Files.createDirectories(ipfsRoot.resolve("pack"));
+        Files.writeString(bmsRoot.resolve("base/song.bms"),
+                "#TITLE Base Configured Chart\n#BPM 120\n#00111:01\n", StandardCharsets.UTF_8);
+        Files.writeString(ipfsRoot.resolve("pack/ipfs_chart.bms"),
+                "#TITLE IPFS Managed Chart\n#BPM 120\n#00111:01\n", StandardCharsets.UTF_8);
+
+        Path db = root.resolve("song.db");
+        String[] configured = {bmsRoot.toString()};
+        String[] withManaged = MusicDownloadProcessor.songScanRoots(configured, ipfsRoot);
+        SQLiteSongDatabaseAccessor songdb = new SQLiteSongDatabaseAccessor(db.toString(), withManaged);
+        songdb.updateSongDatas(null, withManaged, true, null);
+        SongData[] baseRows = songdb.getSongDatasByText("Base Configured Chart");
+        SongData[] ipfsRows = songdb.getSongDatasByText("IPFS Managed Chart");
+        require(baseRows.length == 1 && ipfsRows.length == 1,
+                "songScanRoots retains both configured and managed ipfs rows");
+
+        songdb.updateSongDatas(null, configured, true, null);
+        require(songdb.getSongDatasByText("IPFS Managed Chart").length == 0,
+                "scanning without managed ipfs root prunes ipfs rows");
+
+        songdb.updateSongDatas(null, MusicDownloadProcessor.songScanRoots(configured, ipfsRoot), true, null);
+        require(songdb.getSongDatasByText("IPFS Managed Chart").length == 1,
+                "re-scanning with songScanRoots restores and retains ipfs rows");
     }
 
     private static void validateInputsAndLimits() throws Exception {
