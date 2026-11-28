@@ -26,6 +26,7 @@ import javax.swing.JOptionPane;
 import com.badlogic.gdx.ApplicationListener;
 import com.badlogic.gdx.Gdx;
 import com.badlogic.gdx.Graphics;
+import bms.tool.mdprocessor.MusicDownloadProcessor;
 import javafx.application.Application;
 import javafx.fxml.FXMLLoader;
 import javafx.scene.Scene;
@@ -420,7 +421,7 @@ public class MainLoader extends Application {
 					|| config.isScanSongArchives() != scanSongArchives
 					|| config.getSongArchiveExtractMode() != songArchiveExtractMode) {
 				Class.forName("org.sqlite.JDBC");
-				songdb = new SQLiteSongDatabaseAccessor(nextSongpath, config.getBmsroot(), nextReviewpath,
+				songdb = new SQLiteSongDatabaseAccessor(nextSongpath, MusicDownloadProcessor.songScanRoots(config.getBmsroot()), nextReviewpath,
 						SONG_UPDATER_TYPE, config.isScanSongArchives(), config.getSongArchiveExtractMode());
 				songpath = nextSongpath;
 				reviewpath = nextReviewpath;
