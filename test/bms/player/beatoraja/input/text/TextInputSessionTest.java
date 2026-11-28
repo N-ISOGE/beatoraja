@@ -18,6 +18,11 @@ public final class TextInputSessionTest {
         check(bridge.cancels == 1 && session.isComposing(), "Cancel waits for native response");
         bridge.sink.cancelled(bridge.id); session.drain();
         check(!session.isComposing() && session.displayText().equals("abc") && session.state().anchor() == 1, "Cancel restores committed selection");
+        check(!session.isCancelRequested(), "Escape during composition never cancels the editor");
+        bridge.command(CANCEL, true); session.drain();
+        check(!session.isCancelRequested(), "Consumed Escape cannot cancel the editor");
+        bridge.command(CANCEL, false); session.drain();
+        check(session.isCancelRequested() && bridge.cancels == 1, "Escape outside composition requests editor cancellation");
         bridge.preedit("\u304b\u306a"); bridge.command(SUBMIT, false); session.drain();
         check(bridge.confirms == 1 && !session.isFinishing(), "Enter during composition confirms only");
         bridge.commit("a\u4eeec"); bridge.command(SUBMIT, true); session.drain();

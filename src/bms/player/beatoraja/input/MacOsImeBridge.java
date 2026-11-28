@@ -53,6 +53,7 @@ public final class MacOsImeBridge implements ImeBridge {
             case 1 -> sink.preedit(id, text, cursor);
             case 2 -> sink.cancelled(id);
             case 3 -> sink.command(id, Command.SUBMIT, consumed);
+            case 4 -> sink.command(id, Command.CANCEL, consumed);
             default -> throw new IllegalArgumentException("Unknown IME notification");
         }
     }
