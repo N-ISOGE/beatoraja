@@ -175,6 +175,11 @@ public final class SongArchives {
 				java.util.logging.Logger.getGlobal().log(java.util.logging.Level.WARNING,
 						"Failed to remove expanded archive directory during rollback: " + expanded.destination(), e);
 			}
+			// deleteRecursively ignores per-file IOExceptions, so report leftovers explicitly.
+			if (Files.exists(expanded.destination())) {
+				java.util.logging.Logger.getGlobal().warning(
+						"Expanded archive directory was not fully removed during rollback: " + expanded.destination());
+			}
 		}
 		if (expanded.storedArchive() != null && Files.exists(expanded.storedArchive())
 				&& expanded.originalArchive() != null && !Files.exists(expanded.originalArchive())) {
@@ -185,6 +190,16 @@ public final class SongArchives {
 						"Failed to restore moved archive during rollback: " + expanded.storedArchive()
 								+ " -> " + expanded.originalArchive(),
 						e);
+			}
+		}
+		if (expanded.storedArchive() != null && !Files.exists(expanded.storedArchive())) {
+			Path storage = expanded.storedArchive().getParent();
+			if (storage != null && isArchiveStorageDirectory(storage)) {
+				try {
+					// Removes the storage directory only when this rollback emptied it.
+					Files.deleteIfExists(storage);
+				} catch (IOException ignored) {
+				}
 			}
 		}
 	}

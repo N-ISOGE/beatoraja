@@ -164,6 +164,7 @@ public final class ArchiveMigrationRollbackTest {
         check(Arrays.equals(original, Files.readAllBytes(archive)), "moved archive restored on outer commit failure");
         check(!Files.exists(root.resolve("ecgolb")), "expanded dir removed on outer commit failure");
         check(!Files.exists(root.resolve(".beatoraja-archives/ecgolb.zip")), "stored archive removed on outer commit failure");
+        check(!Files.exists(root.resolve(".beatoraja-archives")), "empty archive storage removed on outer commit failure");
         System.out.println("PASS outer-commit");
     }
 
@@ -186,6 +187,8 @@ public final class ArchiveMigrationRollbackTest {
         accessor(db, root, SongArchiveExtractMode.NO_TEMPORARY_FILES).updateSongDatas(null, roots, false, null);
         List<String> before = rows(db);
         check(before.stream().anyMatch(x -> x.contains("a_first.zip!")) && before.stream().anyMatch(x -> x.contains("b_second.zip!")), "both virtual rows exist");
+        Path olderStored = Files.createDirectories(root.resolve(".beatoraja-archives")).resolve("older.zip");
+        Files.write(olderStored, new byte[] {1, 2, 3});
         SQLiteSongDatabaseAccessor migrate = accessor(db, root, SongArchiveExtractMode.SONG_DIRECTORY);
         boolean[] fired = failDelete(migrate, "song", 2);
         migrate.updateSongDatas(null, roots, false, null);
@@ -196,6 +199,7 @@ public final class ArchiveMigrationRollbackTest {
         check(!Files.exists(root.resolve("a_first")), "first archive expanded dir cleaned up");
         check(Arrays.equals(orig2, Files.readAllBytes(archive2)), "second archive remains at original path");
         check(!Files.exists(root.resolve("b_second")), "second archive not expanded");
+        check(Arrays.equals(new byte[] {1, 2, 3}, Files.readAllBytes(olderStored)), "non-empty archive storage kept on rollback");
         System.out.println("PASS two-archives");
     }
 
