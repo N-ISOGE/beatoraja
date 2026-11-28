@@ -23,7 +23,7 @@ public final class TextInputSession implements AutoCloseable {
     private EditorState state;
     private String preedit = "";
     private int preeditCaret;
-    private boolean composing, finishing, finished;
+    private boolean composing, finishing, finished, cancelRequested;
     private volatile boolean closed;
 
     public TextInputSession(ImeBridge bridge, EditorState initial) {
@@ -79,6 +79,8 @@ public final class TextInputSession implements AutoCloseable {
     public boolean isComposing() { return composing; }
     public boolean isFinishing() { return finishing; }
     public boolean isFinished() { return finished; }
+    /** 変換外の Esc を IME が報告した。 / The IME reported Esc outside a composition. */
+    public boolean isCancelRequested() { return cancelRequested; }
     public String preedit() { return preedit; }
     public int preeditStart() { return Math.min(state.anchor, state.cursor); }
     public int displayCursor() { return composing ? Math.min(state.anchor, state.cursor) + preeditCaret : state.cursor; }
@@ -119,6 +121,7 @@ public final class TextInputSession implements AutoCloseable {
                         if (composing) bridge.confirmComposition(id);
                         else requestFinish();
                     } else if (composing) bridge.cancelComposition(id);
+                    else cancelRequested = true;
                 }
                 case FINISHED -> {
                     if (finishing) { clearComposition(); finished = true; close(); }
